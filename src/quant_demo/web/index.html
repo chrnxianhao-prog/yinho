@@ -259,14 +259,14 @@
     }
     const a=mt5Status.account;
     badge.textContent=`风险：${a.risk_level}`; badge.className=`risk-badge risk-${a.risk_level}`;
-    $('mt5RiskNote').textContent=`${a.risk_message} · 占用率 25/50/80% 与回撤 5/10/20% 为本终端提示档位；Exness 券商保证金/强平规则优先。`;
+    $('mt5RiskNote').textContent=`${a.risk_message} · 占用率 25/50/80% 与净值低于余额 5/10/20% 为本终端提示档位；不是历史高水位回撤，Exness 券商保证金/强平规则优先。`;
     const rows=[
       ['余额',a.balance,a.currency],['净值',a.equity,a.currency],
       ['浮动盈亏',a.profit,a.currency],['已用保证金',a.margin,a.currency],
       ['可用保证金',a.margin_free,a.currency],
       ['保证金占用率',a.margin_usage_pct,'%'],
       ['保证金水平',a.margin_level_pct==null?'∞':a.margin_level_pct,'%'],
-      ['净值回撤',a.equity_drawdown_pct,'%']
+      ['浮亏幅度（相对余额）',a.equity_drawdown_pct,'%']
     ];
     $('mt5Metrics').innerHTML=rows.map(([label,value,unit])=>`<div class="account-box"><div class="muted">${label}</div><div class="metric ${label==='浮动盈亏'?signedClass(value):''}">${value==='∞'?'∞':amount(value)} ${esc(unit)}</div></div>`).join('');
     $('mt5Updated').textContent=`账户 ${esc(a.login)} · ${esc(a.server)} · ${new Date().toLocaleTimeString()}`;
