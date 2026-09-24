@@ -1,0 +1,9 @@
+nautilus_trader==2.0.0rc5
+numpy>=2.0,<3.0
+pandas>=2.2,<3.0
+PyYAML>=6.0,<7.0
+pyarrow>=16.0,<22.0
+akshare>=1.18.0
+MetaTrader5>=5.0; platform_system == "Windows"
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0

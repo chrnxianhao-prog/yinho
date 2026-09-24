@@ -1,0 +1,29 @@
+database_path: data/runtime/quant_demo.db
+execution_mode: paper
+live_trading_enabled: false
+
+automation:
+  entry_levels: [STRONG_ENTRY]
+  exit_levels: [STRONG_EXIT]
+  trade_on_signal_transition_only: true
+  require_explicit_replay_confirmation: true
+
+risk:
+  stock_cn:
+    max_order_quantity: 10000
+    max_position_quantity: 50000
+    max_order_notional: 500000
+    commission_rate: 0.0003
+    minimum_commission: 5
+    sell_tax_rate: 0.0005
+  futures_cn:
+    max_order_quantity: 5
+    max_position_quantity: 10
+    max_order_notional: 1000000
+    fee_per_contract: 4
+  fx_gold:
+    max_order_quantity: 10000
+    max_position_quantity: 50000
+    max_order_notional: 500000
+    commission_rate: 0
+

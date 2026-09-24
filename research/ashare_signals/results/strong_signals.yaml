@@ -1,0 +1,12 @@
+generated_at: '2026-09-21T00:54:52'
+data_end: '2026-09-18'
+selection:
+  horizon: 5
+  min_events: 300
+  min_dates: 100
+  min_t_full: 3.0
+  min_t_oos: 2.0
+  min_net_excess: 0.002
+  min_positive_year_ratio: 0.6
+buy: []
+sell: []

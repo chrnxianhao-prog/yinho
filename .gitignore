@@ -1,0 +1,14 @@
+.env
+.venv/
+.uv-cache/
+.python/
+MT555/
+__pycache__/
+*.pyc
+data/runtime/
+artifacts/
+# Downloaded/provider data is reproducible and may have redistribution limits.
+data/catalog/
+data/mt5/*.csv
+data/ashare/*.csv
+data/futures/*.csv

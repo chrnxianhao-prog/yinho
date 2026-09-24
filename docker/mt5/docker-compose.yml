@@ -1,0 +1,13 @@
+services:
+  mt5-wine:
+    # The community adapter repository supplies mt5.dockerfile and its Wine/MT5 image.
+    # This service is optional for this project: the default exporter uses the
+    # native MetaTrader5 Python package on Windows.
+    build:
+      context: ${NAUTILUS_MT5_REPO_DIR:-../../.external/nautilus_mt5}
+      dockerfile: mt5.dockerfile
+    env_file:
+      - .env
+    ports:
+      - "${MT5_NOVNC_PORT:-60832}:60832"
+    restart: unless-stopped

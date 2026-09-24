@@ -1,0 +1,98 @@
+app:
+  name: nautilus-multi-market-real-data-paper
+  mode: paper
+  live_trading_enabled: false
+  output_dir: artifacts
+
+data:
+  source: parquet_catalog
+  catalog_path: data/catalog/
+  mt5_data_path: data/mt5/
+  ashare_data_path: data/ashare/
+  futures_data_path: data/futures/
+
+markets:
+  stock_cn:
+    enabled: true
+    label: A股
+    venue: SIM_STK
+    account_id: PAPER-STOCK-CNY
+    account_type: CASH
+    base_currency: CNY
+    starting_balance: 1000000
+    timeframe: 1-DAY
+    instruments:
+      - instrument_id: 600000.SH.SIM_STK
+        raw_symbol: 600000.SH
+        kind: equity
+        data_file: 600000_daily.csv
+        price_increment: "0.01"
+        price_precision: 2
+        lot_size: 100
+        trade_size: 100
+        allow_short: false
+
+  futures_cn:
+    enabled: true
+    label: 国内商品期货（主力连续）
+    venue: SIM_FUT
+    account_id: PAPER-FUT-CNY
+    account_type: MARGIN
+    base_currency: CNY
+    starting_balance: 1000000
+    timeframe: 1-DAY
+    instruments:
+      - instrument_id: RB0.SIM_FUT
+        raw_symbol: RB0
+        kind: futures
+        data_file: RB0_daily.csv
+        exchange: SHFE
+        underlying: RB
+        price_increment: "1"
+        price_precision: 0
+        multiplier: 10
+        lot_size: 1
+        margin_init: 0.12
+        margin_maint: 0.10
+        trade_size: 1
+        allow_short: true
+
+  fx_gold:
+    enabled: true
+    label: 外汇/黄金（MT5）
+    venue: SIM_FX
+    account_id: PAPER-FX-USD
+    account_type: MARGIN
+    base_currency: USD
+    starting_balance: 100000
+    timeframe: 1-MINUTE
+    instruments:
+      - instrument_id: EUR/USD.SIM_FX
+        raw_symbol: EURUSD
+        kind: currency_pair
+        base_currency: EUR
+        quote_currency: USD
+        data_file: EURUSD_M1.csv
+        price_increment: "0.00001"
+        price_precision: 5
+        size_precision: 0
+        size_increment: 1
+        lot_size: 1000
+        margin_init: 0.03
+        margin_maint: 0.03
+        trade_size: 1000
+        allow_short: true
+      - instrument_id: XAUUSD.SIM_FX
+        raw_symbol: XAUUSD
+        kind: commodity
+        quote_currency: USD
+        data_file: XAUUSD_M1.csv
+        price_increment: "0.01"
+        price_precision: 2
+        size_precision: 0
+        size_increment: 1
+        lot_size: 1
+        margin_init: 0.05
+        margin_maint: 0.05
+        trade_size: 1
+        allow_short: true

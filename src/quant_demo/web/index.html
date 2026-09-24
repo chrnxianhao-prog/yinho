@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>多市场量化分析与纸面交易终端</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, "Microsoft YaHei", system-ui, sans-serif;
+      --bg:#07111f; --panel:#0d1b2d; --panel2:#12233a; --line:#27405e;
+      --text:#e6eef8; --muted:#8ca1b9; --blue:#38bdf8; --green:#2dd4bf;
+      --red:#fb7185; --yellow:#fbbf24; --purple:#c084fc;
+    }
+    * { box-sizing: border-box; }
+    body { margin:0; background:radial-gradient(circle at 15% -20%,#17365d 0,#07111f 42%); color:var(--text); }
+    header { position:sticky; top:0; z-index:10; background:#07111fee; border-bottom:1px solid var(--line); backdrop-filter:blur(10px); }
+    .header-inner, main { max-width:1500px; margin:auto; padding:14px 18px; }
+    .title-row,.toolbar,.row,.actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    h1 { font-size:1.25rem; margin:0; }
+    h2 { font-size:1rem; margin:0 0 12px; }
+    .badge { border:1px solid #14532d; background:#052e20; color:#86efac; border-radius:999px; padding:4px 9px; font-size:.75rem; font-weight:700; }
+    .muted { color:var(--muted); font-size:.82rem; }
+    .status { margin-left:auto; font-size:.83rem; max-width:48%; text-align:right; }
+    .ok { color:#86efac; } .error { color:#fda4af; }
+    main { display:grid; gap:12px; }
+    .toolbar { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:12px; }
+    select,input,textarea,button { background:#091626; color:var(--text); border:1px solid #35506e; border-radius:8px; padding:9px 10px; }
+    select,input { min-height:38px; }
+    textarea { width:100%; resize:vertical; min-height:72px; }
+    button { cursor:pointer; background:#155e75; border-color:#0891b2; font-weight:700; }
+    button:hover { filter:brightness(1.13); }
+    button.secondary { background:#1e3048; border-color:#46617f; }
+    button.buy { background:#065f46; border-color:#10b981; }
+    button.sell,button.danger { background:#881337; border-color:#f43f5e; }
+    button.warn { background:#78350f; border-color:#f59e0b; }
+    .grid { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:12px; }
+    .card { background:linear-gradient(145deg,var(--panel),#0a1728); border:1px solid var(--line); border-radius:14px; padding:14px; box-shadow:0 14px 35px #0005; }
+    .summary { grid-column:span 3; min-height:125px; }
+    .chart-card { grid-column:span 9; }
+    .side-card { grid-column:span 3; }
+    .half { grid-column:span 6; }
+    .full { grid-column:1/-1; }
+    .metric { font-size:1.45rem; font-weight:800; margin:4px 0; }
+    .signal-STRONG_ENTRY { color:var(--green); } .signal-ENTRY { color:#7dd3fc; }
+    .signal-STRONG_EXIT { color:var(--red); } .signal-EXIT { color:#fda4af; }
+    .signal-WATCH { color:var(--yellow); }
+    #chart { width:100%; height:460px; display:block; border-radius:10px; background:#07111f; cursor:crosshair; }
+    .legend { display:flex; gap:14px; color:var(--muted); font-size:.77rem; margin-bottom:8px; flex-wrap:wrap; }
+    .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; }
+    label { display:block; color:#b8c6d8; font-size:.8rem; margin:8px 0 4px; }
+    .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:7px 10px; }
+    .form-grid input,.form-grid select { width:100%; }
+    table { width:100%; border-collapse:collapse; font-size:.78rem; }
+    th,td { padding:8px 6px; border-bottom:1px solid #20364f; text-align:left; vertical-align:top; }
+    th { color:#9db2c9; position:sticky; top:0; background:var(--panel); }
+    .table-wrap { overflow:auto; max-height:280px; }
+    .account-row { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+    .account-box { background:#091626; border:1px solid #203a57; border-radius:10px; padding:10px; }
+    .small { font-size:.74rem; }
+    @media (max-width:1000px) { .summary{grid-column:span 6}.chart-card{grid-column:1/-1}.side-card{grid-column:span 6} }
+    @media (max-width:680px) {
+      .header-inner,main{padding:10px}.summary,.side-card,.half{grid-column:1/-1}.status{max-width:100%;margin-left:0;text-align:left}
+      #chart{height:340px}.form-grid{grid-template-columns:1fr}.toolbar>*{width:100%}.account-row{grid-template-columns:1fr}
+    }
+  </style>
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="title-row">
+      <h1>多市场量化分析与纸面交易终端</h1>
+      <span class="badge">PAPER ONLY · 实盘关闭</span>
+      <div id="status" class="status muted">正在初始化…</div>
+    </div>
+  </div>
+</header>
+<main>
+  <section class="toolbar">
+    <select id="market"></select>
+    <select id="instrument"></select>
+    <button onclick="refreshAll()">刷新分析</button>
+    <button class="secondary" onclick="runReplay(false)">仅运行信号回放</button>
+    <button class="warn" onclick="runReplay(true)">自动纸面回放</button>
+    <input id="token" type="password" placeholder="WEB_API_TOKEN（本机可空）">
+    <button class="secondary" onclick="saveToken()">保存令牌</button>
+  </section>
+
+  <section class="grid">
+    <article class="card summary"><h2>最新信号</h2><div id="latestSignal" class="metric">—</div><div id="signalScores" class="muted">—</div></article>
+    <article class="card summary"><h2>当前标的</h2><div id="symbolMetric" class="metric">—</div><div id="barMetric" class="muted">—</div></article>
+    <article class="card summary"><h2>风控状态</h2><div id="riskMetric" class="metric">—</div><div id="riskReason" class="muted">—</div></article>
+    <article class="card summary"><h2>数据状态</h2><div id="dataMetric" class="metric">—</div><div id="dataInfo" class="muted">—</div></article>
+
+    <article class="card chart-card">
+      <h2>K线、EMA、强入场/强退出和人工备注</h2>
+      <div class="legend">
+        <span><i class="dot" style="background:#38bdf8"></i>快速EMA</span>
+        <span><i class="dot" style="background:#c084fc"></i>慢速EMA</span>
+        <span><i class="dot" style="background:#2dd4bf"></i>强入场</span>
+        <span><i class="dot" style="background:#fb7185"></i>强退出</span>
+        <span>点击K线可带入备注时间和价格</span>
+      </div>
+      <canvas id="chart"></canvas>
+      <div id="cursorInfo" class="muted" style="margin-top:7px">—</div>
+    </article>
+
+    <article class="card side-card">
+      <h2>添加K线备注</h2>
+      <label>时间</label><input id="noteTime" readonly>
+      <label>价格</label><input id="notePrice" type="number" step="any">
+      <label>标记类型</label>
+      <select id="noteType"><option>STRONG_ENTRY</option><option>ENTRY</option><option>WATCH</option><option>EXIT</option><option>STRONG_EXIT</option><option>BAD_SIGNAL</option><option>REVIEW</option></select>
+      <label>文字备注</label><textarea id="noteText" placeholder="为什么是强入场/强退出？记录你的判断。"></textarea>
+      <div class="form-grid"><div><label>止损</label><input id="stopLoss" type="number" step="any"></div><div><label>止盈</label><input id="takeProfit" type="number" step="any"></div></div>
+      <label>标签（逗号分隔）</label><input id="noteTags" placeholder="趋势,放量,突破">
+      <button style="margin-top:10px;width:100%" onclick="addAnnotation()">保存备注和指标快照</button>
+    </article>
+
+    <article class="card half">
+      <h2>指标与强度规则</h2>
+      <div class="form-grid">
+        <div><label>快速EMA</label><input id="fastEma" type="number" min="2"></div>
+        <div><label>慢速EMA</label><input id="slowEma" type="number" min="3"></div>
+        <div><label>RSI周期</label><input id="rsiPeriod" type="number" min="2"></div>
+        <div><label>ATR周期</label><input id="atrPeriod" type="number" min="2"></div>
+        <div><label>成交量周期</label><input id="volumePeriod" type="number" min="2"></div>
+        <div><label>放量倍数</label><input id="volumeRatio" type="number" min="0" step="0.05"></div>
+        <div><label>入场阈值</label><input id="entryThreshold" type="number" min="0" max="100"></div>
+        <div><label>强入场阈值</label><input id="strongEntryThreshold" type="number" min="0" max="100"></div>
+        <div><label>退出阈值</label><input id="exitThreshold" type="number" min="0" max="100"></div>
+        <div><label>强退出阈值</label><input id="strongExitThreshold" type="number" min="0" max="100"></div>
+      </div>
+      <button style="margin-top:10px" onclick="saveRule()">保存为新规则版本</button>
+      <span id="ruleVersion" class="muted"></span>
+    </article>
+
+    <article class="card half">
+      <h2>纸面下单与市场风控</h2>
+      <div class="form-grid">
+        <div><label>方向</label><select id="orderSide"><option>BUY</option><option>SELL</option></select></div>
+        <div><label>数量</label><input id="orderQty" type="number" min="1" step="1"></div>
+      </div>
+      <label>订单备注</label><input id="orderNote" placeholder="人工下单原因">
+      <div class="actions" style="margin-top:10px"><button class="buy" onclick="submitOrder('BUY')">模拟买入</button><button class="sell" onclick="submitOrder('SELL')">模拟卖出</button><button class="secondary" onclick="closeCurrentPosition()">模拟平仓</button></div>
+      <hr style="border:0;border-top:1px solid #27405e;margin:15px 0">
+      <div class="actions"><button class="danger" onclick="setRisk(true,false)">开启 Kill Switch</button><button class="warn" onclick="setRisk(false,true)">只允许平仓</button><button class="secondary" onclick="setRisk(false,false)">恢复纸面交易</button></div>
+    </article>
+
+    <article class="card full"><h2>三个独立纸面账户</h2><div id="accounts" class="account-row">—</div></article>
+    <article class="card half"><h2>当前持仓</h2><div class="table-wrap"><table><thead><tr><th>市场</th><th>标的</th><th>数量</th><th>均价</th><th>现价</th><th>浮盈亏</th></tr></thead><tbody id="positions"></tbody></table></div></article>
+    <article class="card half"><h2>强信号与备注</h2><div class="table-wrap"><table><thead><tr><th>时间</th><th>类型</th><th>分数/内容</th></tr></thead><tbody id="events"></tbody></table></div></article>
+    <article class="card full"><h2>最近纸面订单</h2><div class="table-wrap"><table><thead><tr><th>时间</th><th>市场</th><th>标的</th><th>方向</th><th>数量</th><th>价格</th><th>费用</th><th>来源</th><th>备注</th></tr></thead><tbody id="orders"></tbody></table></div></article>
+  </section>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  const esc = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+  let appConfig = {markets:[]}, analysisData = null, dashboard = null, selectedBar = null;
+  $('token').value = localStorage.getItem('web_api_token') || '';
+
+  function authHeaders() { const h={'Content-Type':'application/json'}; const t=$('token').value.trim(); if(t) h.Authorization=`Bearer ${t}`; return h; }
+  async function api(path, options={}) { const response=await fetch(path,{...options,headers:{...authHeaders(),...(options.headers||{})}}); const data=await response.json().catch(()=>({})); if(!response.ok) throw new Error(data.detail||`HTTP ${response.status}`); return data; }
+  function setStatus(message, good=false) { $('status').textContent=message; $('status').className=`status ${good?'ok':'error'}`; }
+  function currentMarket() { return $('market').value; }
+  function currentInstrument() { return $('instrument').value; }
+  function saveToken() { localStorage.setItem('web_api_token',$('token').value); refreshAll(); }
+
+  async function initialize() {
+    try {
+      appConfig=await api('/api/config');
+      $('market').innerHTML=appConfig.markets.map(m=>`<option value="${esc(m.market_id)}">${esc(m.label)}</option>`).join('');
+      $('market').onchange=()=>{ populateInstruments(); refreshAll(); };
+      $('instrument').onchange=()=>refreshAll();
+      populateInstruments(); await refreshAll();
+    } catch(e) { setStatus(e.message); }
+  }
+  function populateInstruments() {
+    const market=appConfig.markets.find(m=>m.market_id===currentMarket()) || appConfig.markets[0];
+    $('instrument').innerHTML=(market?.instruments||[]).map(i=>`<option value="${esc(i.instrument_id)}">${esc(i.raw_symbol)}</option>`).join('');
+    const item=market?.instruments?.[0]; if(item) $('orderQty').value=item.trade_size;
+  }
+  async function refreshAll() {
+    const market=currentMarket(), instrument=currentInstrument(); if(!market||!instrument) return;
+    setStatus('正在加载真实历史数据、指标和审计账本…');
+    try {
+      [analysisData,dashboard]=await Promise.all([
+        api(`/api/analysis?market_id=${encodeURIComponent(market)}&instrument_id=${encodeURIComponent(instrument)}&limit=360`),
+        api('/api/status')
+      ]);
+      renderAll(); setStatus('分析完成；所有下单仍为纸面模拟',true);
+    } catch(e) { analysisData=null; renderDashboardOnly(); setStatus(e.message); }
+  }
+  function renderAll() {
+    const latest=analysisData.latest;
+    $('latestSignal').textContent=latest.level;
+    $('latestSignal').className=`metric signal-${latest.level}`;
+    $('signalScores').textContent=`入场 ${latest.entry_score.toFixed(0)} / 退出 ${latest.exit_score.toFixed(0)} · ${latest.reasons.join('；')}`;
+    $('symbolMetric').textContent=analysisData.raw_symbol;
+    const last=analysisData.bars.at(-1); $('barMetric').textContent=`${last.timestamp} · 收盘 ${last.close}`;
+    $('dataMetric').textContent=`${analysisData.total_bars} 根`;
+    $('dataInfo').textContent=`当前显示 ${analysisData.bars.length} 根真实历史K线`;
+    selectedBar=last; fillAnnotationSelection(last); fillRule(analysisData.rule);
+    renderDashboardOnly(); drawChart(); renderEvents();
+  }
+  function renderDashboardOnly() {
+    if(!dashboard) return;
+    const flag=dashboard.risk.find(x=>x.market_id===currentMarket());
+    $('riskMetric').textContent=flag?.kill_switch?'KILL':flag?.close_only?'CLOSE ONLY':'正常';
+    $('riskMetric').className=`metric ${flag?.kill_switch?'signal-STRONG_EXIT':'signal-STRONG_ENTRY'}`;
+    $('riskReason').textContent=flag?.reason||'纸面账户风控已启用';
+    $('accounts').innerHTML=dashboard.accounts.map(a=>`<div class="account-box"><b>${esc(a.market_id)}</b><div class="metric">${Number(a.equity).toFixed(2)} ${esc(a.currency)}</div><div class="muted">账户 ${esc(a.account_id)}<br>现金 ${Number(a.cash).toFixed(2)} · 可用 ${Number(a.available).toFixed(2)}</div></div>`).join('');
+    $('positions').innerHTML=dashboard.positions.length?dashboard.positions.map(p=>`<tr><td>${esc(p.market_id)}</td><td>${esc(p.raw_symbol)}</td><td>${p.quantity}</td><td>${Number(p.average_price).toFixed(4)}</td><td>${Number(p.last_price).toFixed(4)}</td><td>${Number(p.unrealized_pnl).toFixed(2)}</td></tr>`).join(''):'<tr><td colspan="6">暂无持仓</td></tr>';
+    $('orders').innerHTML=dashboard.orders.length?dashboard.orders.map(o=>`<tr><td>${esc(o.created_at)}</td><td>${esc(o.market_id)}</td><td>${esc(o.raw_symbol)}</td><td>${esc(o.side)}</td><td>${o.quantity}</td><td>${o.price}</td><td>${Number(o.fee).toFixed(2)}</td><td>${esc(o.source)}</td><td>${esc(o.note)}</td></tr>`).join(''):'<tr><td colspan="9">暂无订单</td></tr>';
+  }
+  function renderEvents() {
+    const signals=(analysisData?.signals||[]).slice().reverse().slice(0,30).map(s=>({time:s.timestamp,type:s.level,text:`入${s.entry_score.toFixed(0)} / 出${s.exit_score.toFixed(0)}`}));
+    const notes=(analysisData?.annotations||[]).slice(0,30).map(n=>({time:n.bar_timestamp,type:`备注:${n.annotation_type}`,text:n.note}));
+    const rows=[...signals,...notes].sort((a,b)=>b.time.localeCompare(a.time)).slice(0,50);
+    $('events').innerHTML=rows.length?rows.map(x=>`<tr><td>${esc(x.time)}</td><td class="signal-${esc(x.type.replace('备注:',''))}">${esc(x.type)}</td><td>${esc(x.text)}</td></tr>`).join(''):'<tr><td colspan="3">暂无信号或备注</td></tr>';
+  }
+  function fillRule(ruleData) {
+    const r=ruleData.config; $('ruleVersion').textContent=`当前版本 v${ruleData.version}`;
+    $('fastEma').value=r.fast_ema; $('slowEma').value=r.slow_ema; $('rsiPeriod').value=r.rsi_period; $('atrPeriod').value=r.atr_period;
+    $('volumePeriod').value=r.volume_period; $('volumeRatio').value=r.volume_ratio_threshold; $('entryThreshold').value=r.entry_threshold;
+    $('strongEntryThreshold').value=r.strong_entry_threshold; $('exitThreshold').value=r.exit_threshold; $('strongExitThreshold').value=r.strong_exit_threshold;
+  }
+  function fillAnnotationSelection(bar) {
+    if(!bar) return; $('noteTime').value=bar.timestamp; $('notePrice').value=bar.close;
+    $('cursorInfo').textContent=`${bar.timestamp}  O ${bar.open}  H ${bar.high}  L ${bar.low}  C ${bar.close}  RSI ${bar.rsi?.toFixed(2)??'—'}  ATR ${bar.atr?.toFixed(4)??'—'}`;
+  }
+  function drawChart() {
+    const canvas=$('chart'), ctx=canvas.getContext('2d'), rect=canvas.getBoundingClientRect(), dpr=window.devicePixelRatio||1;
+    canvas.width=Math.max(300,Math.floor(rect.width*dpr)); canvas.height=Math.floor(rect.height*dpr); ctx.scale(dpr,dpr);
+    const w=rect.width,h=rect.height,bars=(analysisData?.bars||[]).slice(-150); ctx.clearRect(0,0,w,h); if(!bars.length)return;
+    const pad={l:55,r:14,t:18,b:26}, plotW=w-pad.l-pad.r,plotH=h-pad.t-pad.b;
+    const values=bars.flatMap(b=>[b.high,b.low,b.ema_fast,b.ema_slow]).filter(Number.isFinite); let min=Math.min(...values),max=Math.max(...values); const margin=(max-min)*.08||1; min-=margin;max+=margin;
+    const y=v=>pad.t+(max-v)/(max-min)*plotH, x=i=>pad.l+(i+.5)*plotW/bars.length;
+    ctx.strokeStyle='#18304a';ctx.lineWidth=1;ctx.fillStyle='#7790aa';ctx.font='11px system-ui';
+    for(let i=0;i<=5;i++){const yy=pad.t+i*plotH/5;ctx.beginPath();ctx.moveTo(pad.l,yy);ctx.lineTo(w-pad.r,yy);ctx.stroke();ctx.fillText((max-i*(max-min)/5).toFixed(2),3,yy+4)}
+    const cw=Math.max(2,plotW/bars.length*.62); bars.forEach((b,i)=>{const xx=x(i),up=b.close>=b.open,c=up?'#2dd4bf':'#fb7185';ctx.strokeStyle=c;ctx.fillStyle=c;ctx.beginPath();ctx.moveTo(xx,y(b.high));ctx.lineTo(xx,y(b.low));ctx.stroke();const top=Math.min(y(b.open),y(b.close)),bh=Math.max(1,Math.abs(y(b.open)-y(b.close)));ctx.fillRect(xx-cw/2,top,cw,bh)});
+    function line(key,color){ctx.strokeStyle=color;ctx.lineWidth=1.6;ctx.beginPath();let started=false;bars.forEach((b,i)=>{if(!Number.isFinite(b[key]))return;const xx=x(i),yy=y(b[key]);if(!started){ctx.moveTo(xx,yy);started=true}else ctx.lineTo(xx,yy)});ctx.stroke()}
+    line('ema_fast','#38bdf8');line('ema_slow','#c084fc');
+    const sig=new Map((analysisData.signals||[]).map(s=>[s.timestamp,s])); const ann=new Map((analysisData.annotations||[]).map(a=>[a.bar_timestamp,a]));
+    bars.forEach((b,i)=>{const s=sig.get(b.timestamp),a=ann.get(b.timestamp),xx=x(i);if(s){const entry=s.level.includes('ENTRY');ctx.fillStyle=entry?'#2dd4bf':'#fb7185';ctx.beginPath();ctx.moveTo(xx,y(entry?b.low:b.high)+(entry?12:-12));ctx.lineTo(xx-6,y(entry?b.low:b.high)+(entry?22:-22));ctx.lineTo(xx+6,y(entry?b.low:b.high)+(entry?22:-22));ctx.closePath();ctx.fill()}if(a){ctx.fillStyle='#fbbf24';ctx.beginPath();ctx.arc(xx,y(b.close),4,0,Math.PI*2);ctx.fill()}});
+    canvas.onclick=e=>{const r=canvas.getBoundingClientRect();const idx=Math.max(0,Math.min(bars.length-1,Math.floor((e.clientX-r.left-pad.l)/plotW*bars.length)));selectedBar=bars[idx];fillAnnotationSelection(selectedBar)};
+  }
+  window.addEventListener('resize',()=>analysisData&&drawChart());
+
+  async function saveRule() {
+    if(!confirm('保存为新的指标规则版本？旧版本和历史信号会保留。'))return;
+    const config={fast_ema:+$('fastEma').value,slow_ema:+$('slowEma').value,rsi_period:+$('rsiPeriod').value,atr_period:+$('atrPeriod').value,volume_period:+$('volumePeriod').value,volume_ratio_threshold:+$('volumeRatio').value,entry_threshold:+$('entryThreshold').value,strong_entry_threshold:+$('strongEntryThreshold').value,exit_threshold:+$('exitThreshold').value,strong_exit_threshold:+$('strongExitThreshold').value};
+    try{await api(`/api/rules/${encodeURIComponent(currentMarket())}/${encodeURIComponent(currentInstrument())}`,{method:'PUT',body:JSON.stringify({config,confirm:true})});await refreshAll()}catch(e){setStatus(e.message)}
+  }
+  async function addAnnotation() {
+    if(!selectedBar)return; const payload={market_id:currentMarket(),instrument_id:currentInstrument(),bar_timestamp:$('noteTime').value,price:+$('notePrice').value,annotation_type:$('noteType').value,note:$('noteText').value,tags:$('noteTags').value.split(',').map(x=>x.trim()).filter(Boolean),stop_loss:$('stopLoss').value?+$('stopLoss').value:null,take_profit:$('takeProfit').value?+$('takeProfit').value:null,indicator_snapshot:{ema_fast:selectedBar.ema_fast,ema_slow:selectedBar.ema_slow,macd_hist:selectedBar.macd_hist,rsi:selectedBar.rsi,atr:selectedBar.atr,volume_ratio:selectedBar.volume_ratio}};
+    try{await api('/api/annotations',{method:'POST',body:JSON.stringify(payload)});$('noteText').value='';await refreshAll();setStatus('备注已保存并绑定指标快照',true)}catch(e){setStatus(e.message)}
+  }
+  async function submitOrder(side) {
+    const qty=+$('orderQty').value;if(!confirm(`确认纸面${side==='BUY'?'买入':'卖出'} ${qty}？不会发送到真实柜台。`))return;
+    try{const r=await api('/api/paper/orders',{method:'POST',body:JSON.stringify({market_id:currentMarket(),instrument_id:currentInstrument(),side,quantity:qty,note:$('orderNote').value,confirm:true,idempotency_key:crypto.randomUUID()})});dashboard=r.dashboard;renderDashboardOnly();setStatus(`纸面订单已成交：${r.order.order_id}`,true)}catch(e){setStatus(e.message)}
+  }
+  async function closeCurrentPosition(){if(!confirm('确认按最新历史价格模拟平掉当前标的全部持仓？'))return;try{const r=await api('/api/paper/positions/close',{method:'POST',body:JSON.stringify({market_id:currentMarket(),instrument_id:currentInstrument(),confirm:true})});dashboard=r.dashboard;renderDashboardOnly();setStatus('纸面持仓已平仓',true)}catch(e){setStatus(e.message)}}
+  async function runReplay(autoTrade){if(autoTrade&&!confirm('将重置当前市场纸面账户，并按强信号自动回放交易。确认继续？'))return;try{setStatus('正在执行历史回放…');const r=await api('/api/replay',{method:'POST',body:JSON.stringify({market_id:currentMarket(),instrument_id:currentInstrument(),auto_trade:autoTrade,reset_account:autoTrade,confirm:autoTrade})});dashboard=r.dashboard;await refreshAll();setStatus(`回放完成：${r.bars}根K线，${r.signal_transitions}次信号变化，${r.paper_orders}笔纸面订单`,true)}catch(e){setStatus(e.message)}}
+  async function setRisk(kill,closeOnly){const label=kill?'开启 Kill Switch':closeOnly?'切换为只允许平仓':'恢复纸面交易';if(!confirm(`确认${label}？`))return;try{await api('/api/risk',{method:'POST',body:JSON.stringify({market_id:currentMarket(),kill_switch:kill,close_only:closeOnly,reason:label,confirm:true})});dashboard=await api('/api/status');renderDashboardOnly();setStatus(`${label}成功`,true)}catch(e){setStatus(e.message)}}
+  initialize();
+</script>
+</body>
+</html>

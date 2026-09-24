@@ -1,0 +1,11 @@
+lookahead:
+  checked: 2496
+  examples: []
+  mismatched: 0
+panel:
+  dates: 2848
+  first_date: '2015-01-05'
+  last_date: '2026-09-18'
+  rows: 123470
+  skipped_not_in_pool: 0
+  stocks: 59
