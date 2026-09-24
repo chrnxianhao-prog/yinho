@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import sleep
 from typing import Any
@@ -51,9 +51,11 @@ class Mt5DemoAdapter:
         self.mt5 = mt5
         self._connected = False
         self.magic = int(os.getenv("MT5_MAGIC", "26091701"))
+        self.manual_magic = int(os.getenv("MT5_MANUAL_MAGIC", "26091702"))
+        self.ai_magic = int(os.getenv("MT5_AI_MAGIC", "26091703"))
         self.deviation = int(os.getenv("MT5_DEVIATION", "20"))
 
-    def connect_demo(self) -> Any:
+    def connect_demo(self, *, require_trading: bool = False) -> Any:
         kwargs: dict[str, object] = {
             "login": int(os.environ["MT5_LOGIN"]),
             "password": os.environ["MT5_PASSWORD"],
@@ -76,7 +78,7 @@ class Mt5DemoAdapter:
                 f"Refusing to trade: account {account.login} is not Demo "
                 f"(trade_mode={account.trade_mode}).",
             )
-        if not bool(account.trade_allowed):
+        if require_trading and not bool(account.trade_allowed):
             self.close()
             raise RuntimeError("MT5 account does not allow trading.")
         return account
@@ -141,11 +143,85 @@ class Mt5DemoAdapter:
                 "price_open": float(position.price_open),
                 "price_current": float(position.price_current),
                 "profit": float(position.profit),
+                "swap": float(getattr(position, "swap", 0.0)),
+                "net_floating": float(position.profit) + float(getattr(position, "swap", 0.0)),
                 "magic": int(position.magic),
                 "time": int(position.time),
             }
             for position in positions
         ]
+
+    def get_deals(self, days: int = 90) -> list[dict[str, Any]]:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=max(1, min(days, 3650)))
+        deals = self.mt5.history_deals_get(start, end)
+        if deals is None:
+            raise RuntimeError(f"history_deals_get failed: {self.mt5.last_error()}")
+        rows: list[dict[str, Any]] = []
+        for deal in deals:
+            profit = float(getattr(deal, "profit", 0.0))
+            commission = float(getattr(deal, "commission", 0.0))
+            swap = float(getattr(deal, "swap", 0.0))
+            fee = float(getattr(deal, "fee", 0.0))
+            magic = int(getattr(deal, "magic", 0))
+            comment = str(getattr(deal, "comment", ""))
+            if magic == self.manual_magic or "MANUAL" in comment.upper():
+                source = "人工下单"
+            elif magic == self.ai_magic or any(tag in comment.upper() for tag in ("AI", "STRATEGY")):
+                source = "AI/策略"
+            elif magic == 0:
+                source = "MT5手动/外部"
+            elif magic == self.magic:
+                source = "程序测试"
+            else:
+                source = "其他EA/外部"
+            rows.append({
+                "ticket": int(deal.ticket), "order": int(getattr(deal, "order", 0)),
+                "position_id": int(getattr(deal, "position_id", 0)),
+                "time": int(deal.time), "symbol": str(getattr(deal, "symbol", "")),
+                "type": int(getattr(deal, "type", -1)), "entry": int(getattr(deal, "entry", -1)),
+                "side": (
+                    "BUY" if int(getattr(deal, "type", -1)) == int(self.mt5.DEAL_TYPE_BUY)
+                    else "SELL" if int(getattr(deal, "type", -1)) == int(self.mt5.DEAL_TYPE_SELL)
+                    else "—"
+                ),
+                "volume": float(getattr(deal, "volume", 0.0)),
+                "price": float(getattr(deal, "price", 0.0)), "profit": profit,
+                "commission": commission, "swap": swap, "fee": fee,
+                "net_pnl": profit + commission + swap + fee,
+                "magic": magic, "source": source, "comment": comment,
+            })
+        return sorted(rows, key=lambda row: row["time"], reverse=True)
+
+    def get_trade_summaries(self, days: int = 3650) -> list[dict[str, Any]]:
+        grouped: dict[str, dict[str, Any]] = {}
+        # Deals are stored newest-first for the UI; walk chronologically so
+        # the summary direction/source comes from the opening fill.
+        for deal in reversed(self.get_deals(days)):
+            if not deal["symbol"] and not deal["position_id"]:
+                continue
+            key = str(deal["position_id"] or deal["order"])
+            row = grouped.setdefault(key, {
+                "trade_key": key, "position_id": deal["position_id"],
+                "symbol": deal["symbol"], "side": deal.get("side", "—"),
+                "source": deal["source"], "first_time": deal["time"],
+                "last_time": deal["time"], "volume": 0.0,
+                "buy_volume": 0.0, "sell_volume": 0.0, "profit": 0.0,
+                "commission": 0.0, "swap": 0.0, "fee": 0.0, "net_pnl": 0.0,
+                "deal_count": 0, "tickets": [],
+            })
+            row["first_time"] = min(row["first_time"], deal["time"])
+            row["last_time"] = max(row["last_time"], deal["time"])
+            if deal["side"] == "BUY":
+                row["buy_volume"] += deal["volume"]
+            elif deal["side"] == "SELL":
+                row["sell_volume"] += deal["volume"]
+            row["volume"] = max(row["buy_volume"], row["sell_volume"])
+            for field in ("profit", "commission", "swap", "fee", "net_pnl"):
+                row[field] += deal[field]
+            row["deal_count"] += 1
+            row["tickets"].append(deal["ticket"])
+        return sorted(grouped.values(), key=lambda row: row["last_time"], reverse=True)
 
     def _send(self, request: dict[str, Any]) -> DemoOrderResult:
         check = self.mt5.order_check(request)
@@ -172,7 +248,10 @@ class Mt5DemoAdapter:
             comment=str(result.comment),
         )
 
-    def open_market(self, symbol: str, side: str, volume: float) -> DemoOrderResult:
+    def open_market(
+        self, symbol: str, side: str, volume: float, *,
+        origin: str = "MANUAL", strategy_id: str | None = None,
+    ) -> DemoOrderResult:
         info, tick, normalized = self._check_symbol(symbol, volume)
         existing = self.mt5.positions_get(symbol=symbol) or ()
         if existing:
@@ -182,6 +261,15 @@ class Mt5DemoAdapter:
             raise ValueError("side must be BUY or SELL")
         order_type = self.mt5.ORDER_TYPE_BUY if side_upper == "BUY" else self.mt5.ORDER_TYPE_SELL
         price = float(tick.ask if side_upper == "BUY" else tick.bid)
+        origin_upper = origin.upper()
+        magic_by_origin = {"TEST": self.magic, "MANUAL": self.manual_magic, "AI": self.ai_magic}
+        if origin_upper not in magic_by_origin:
+            raise ValueError("origin must be TEST, MANUAL, or AI")
+        comment = {
+            "TEST": "quant_demo_smoke_test",
+            "MANUAL": "quant_demo_manual_ui",
+            "AI": f"quant_demo_ai_{strategy_id or 'strategy'}"[:31],
+        }[origin_upper]
         request = {
             "action": self.mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
@@ -189,8 +277,8 @@ class Mt5DemoAdapter:
             "type": order_type,
             "price": price,
             "deviation": self.deviation,
-            "magic": self.magic,
-            "comment": "quant_demo_mt5_demo_smoke",
+            "magic": magic_by_origin[origin_upper],
+            "comment": comment,
             "type_time": self.mt5.ORDER_TIME_GTC,
             "type_filling": self._filling_mode(info),
         }
@@ -206,8 +294,9 @@ class Mt5DemoAdapter:
             sleep(0.25)
         raise RuntimeError(f"No new MT5 position appeared for {symbol} after the order.")
 
-    def close_position(self, position: Any) -> DemoOrderResult:
-        if int(position.magic) != self.magic:
+    def close_position(self, position: Any, *, allow_external: bool = False) -> DemoOrderResult:
+        owned_magics = {self.magic, self.manual_magic, self.ai_magic}
+        if int(position.magic) not in owned_magics and not allow_external:
             raise RuntimeError("Refusing to close a position not created by this paper adapter.")
         symbol = str(position.symbol)
         info, tick, normalized = self._check_symbol(symbol, float(position.volume))
@@ -222,15 +311,20 @@ class Mt5DemoAdapter:
             "position": int(position.ticket),
             "price": price,
             "deviation": self.deviation,
-            "magic": self.magic,
-            "comment": "quant_demo_close",
+            "magic": int(position.magic),
+            "comment": (
+                "quant_demo_manual_close" if int(position.magic) == self.manual_magic
+                else "quant_demo_ai_close" if int(position.magic) == self.ai_magic
+                else "quant_demo_smoke_close" if int(position.magic) == self.magic
+                else "quant_demo_external_close"
+            ),
             "type_time": self.mt5.ORDER_TIME_GTC,
             "type_filling": self._filling_mode(info),
         }
         return self._send(request)
 
-    def close_position_ticket(self, ticket: int) -> DemoOrderResult:
+    def close_position_ticket(self, ticket: int, *, allow_external: bool = False) -> DemoOrderResult:
         positions = self.mt5.positions_get(ticket=int(ticket)) or ()
         if not positions:
             raise RuntimeError(f"Position ticket {ticket} was not found")
-        return self.close_position(positions[0])
+        return self.close_position(positions[0], allow_external=allow_external)

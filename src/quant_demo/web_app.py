@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import json
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -95,6 +97,16 @@ class Mt5OrderRequest(BaseModel):
     confirm: bool = False
 
 
+class Mt5CloseRequest(BaseModel):
+    ticket: int = Field(gt=0)
+    confirm: bool = False
+
+
+class Mt5CloseRequest(BaseModel):
+    ticket: int = Field(gt=0)
+    confirm: bool = False
+
+
 def _check_token(authorization: str | None) -> None:
     expected = os.getenv("WEB_API_TOKEN", "")
     if expected and authorization != f"Bearer {expected}":
@@ -115,25 +127,52 @@ def _http_error(exc: Exception) -> HTTPException:
 
 
 @contextmanager
-def _mt5_session() -> Iterator[tuple[Mt5DemoAdapter, Any]]:
+def _mt5_session(*, require_trading: bool = False) -> Iterator[tuple[Mt5DemoAdapter, Any]]:
     adapter = Mt5DemoAdapter(ROOT / ".env")
     try:
-        account = adapter.connect_demo()
+        account = adapter.connect_demo(require_trading=require_trading)
         yield adapter, account
     finally:
         adapter.close()
 
 
 def _mt5_account(account: Any) -> dict[str, Any]:
+    balance = float(account.balance)
+    equity = float(account.equity)
+    margin = float(account.margin)
+    margin_usage = margin / equity * 100.0 if equity > 0 else 100.0
+    drawdown = max(0.0, (balance - equity) / balance * 100.0) if balance > 0 else 100.0
+
+    # Product warning bands; broker stop-out rules remain authoritative.
+    usage_band = (
+        3 if margin_usage >= 80 else 2 if margin_usage >= 50
+        else 1 if margin_usage >= 25 else 0
+    )
+    drawdown_band = (
+        3 if drawdown >= 20 else 2 if drawdown >= 10
+        else 1 if drawdown >= 5 else 0
+    )
+    risk_level = ("低", "中", "高", "极高")[max(usage_band, drawdown_band)]
+    risk_message = {
+        "低": "保证金占用与净值回撤处于终端预警低档",
+        "中": "注意控制仓位，保证金或净值回撤达到中档提醒",
+        "高": "风险偏高，建议减仓；请同时核对券商强平线",
+        "极高": "极高风险提醒；终端不保证阻止券商强平",
+    }[risk_level]
     return {
         "login": int(account.login),
         "server": str(account.server),
         "currency": str(account.currency),
-        "balance": float(account.balance),
-        "equity": float(account.equity),
-        "margin": float(account.margin),
+        "balance": balance,
+        "equity": equity,
+        "margin": margin,
         "margin_free": float(account.margin_free),
         "profit": float(account.profit),
+        "margin_level_pct": equity / margin * 100.0 if margin > 0 else None,
+        "margin_usage_pct": margin_usage,
+        "equity_drawdown_pct": drawdown,
+        "risk_level": risk_level,
+        "risk_message": risk_message,
         "trade_allowed": bool(account.trade_allowed),
     }
 
@@ -305,15 +344,23 @@ def update_risk(
 
 
 @app.get("/api/mt5/status")
-def mt5_status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+def mt5_status(
+    history_days: int = Query(default=3650, ge=1, le=3650),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
     _check_token(authorization)
     try:
         symbols = [item.strip().upper() for item in os.getenv("WEB_SYMBOLS", "EURUSD,XAUUSD").split(",")]
         with _mt5_session() as (adapter, account):
+            trades = adapter.get_trade_summaries(history_days)
+            for trade in trades:
+                trade["currency"] = str(account.currency)
+            service.store.upsert_mt5_trade_summaries(int(account.login), trades)
             return {
                 "account": _mt5_account(account),
                 "quotes": {symbol: adapter.get_quote(symbol) for symbol in symbols if symbol},
                 "positions": adapter.get_positions(),
+                "trades": trades[:500],
             }
     except Exception as exc:
         raise _http_error(exc) from exc
@@ -330,8 +377,123 @@ def mt5_order(
     if payload.volume > max_volume:
         raise HTTPException(status_code=400, detail=f"手数超过 WEB_MAX_VOLUME={max_volume}")
     try:
-        with _mt5_session() as (adapter, account):
-            result = adapter.open_market(payload.symbol.upper(), payload.side, payload.volume)
+        allowed_symbols = {
+            item.strip().upper()
+            for item in os.getenv("WEB_SYMBOLS", "EURUSD,XAUUSD").split(",")
+            if item.strip()
+        }
+        if payload.symbol.upper() not in allowed_symbols:
+            raise HTTPException(status_code=400, detail="品种不在 WEB_SYMBOLS Demo 白名单中")
+        with _mt5_session(require_trading=True) as (adapter, account):
+            result = adapter.open_market(
+                payload.symbol.upper(), payload.side, payload.volume, origin="MANUAL",
+            )
+            service.store.audit(
+                "MT5_DEMO_ORDER", "OPEN_ACCEPTED",
+                {
+                    "symbol": payload.symbol.upper(), "side": payload.side,
+                    "requested_volume": payload.volume, "order_ticket": result.order_ticket,
+                    "deal_ticket": result.deal_ticket, "filled_volume": result.volume,
+                    "price": result.price, "retcode": result.retcode, "source": "人工下单",
+                },
+                "fx_gold",
+            )
             return {"account": _mt5_account(account), "order": result.__dict__, "positions": adapter.get_positions()}
     except Exception as exc:
+        if isinstance(exc, HTTPException):
+            raise
         raise _http_error(exc) from exc
+
+
+@app.post("/api/mt5/positions/close")
+def mt5_close_position(
+    payload: Mt5CloseRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _check_token(authorization)
+    _require_confirmation(payload.confirm, "MT5 Demo 平仓")
+    try:
+        with _mt5_session(require_trading=True) as (adapter, account):
+            result = adapter.close_position_ticket(payload.ticket, allow_external=True)
+            service.store.audit(
+                "MT5_DEMO_ORDER", "CLOSE_ACCEPTED",
+                {
+                    "position_ticket": payload.ticket, "order_ticket": result.order_ticket,
+                    "deal_ticket": result.deal_ticket, "filled_volume": result.volume,
+                    "price": result.price, "retcode": result.retcode, "source": "本人手动平仓",
+                },
+                "fx_gold",
+            )
+            return {
+                "account": _mt5_account(account), "order": result.__dict__,
+                "positions": adapter.get_positions(),
+            }
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@app.get("/api/activity")
+def activity(
+    limit: int = Query(default=500, ge=1, le=2000),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _check_token(authorization)
+    paper_rows = service.store.query(
+        """
+        SELECT o.order_id AS id, o.created_at AS time, o.market_id, o.raw_symbol AS symbol,
+               o.side, o.quantity, o.price, o.fee, o.realized_pnl AS gross_pnl, o.net_pnl,
+               o.source, o.note, o.status, 'PAPER' AS account_type,
+               COALESCE(a.currency, '') AS currency
+        FROM orders o LEFT JOIN accounts a ON a.market_id=o.market_id
+        ORDER BY o.created_at DESC LIMIT ?
+        """,
+        (limit,),
+    )
+    for row in paper_rows:
+        row["category"] = (
+            "本人手动" if str(row["source"]).startswith("MANUAL")
+            else "AI/策略" if str(row["source"]).startswith(("AUTO", "AI"))
+            else "回测/其他"
+        )
+        row["commission"] = float(row.pop("fee") or 0.0)
+        row["swap"] = 0.0
+        row["other_fee"] = 0.0
+    mt5_rows = []
+    for stored in service.store.query(
+        "SELECT payload_json FROM mt5_trade_summaries ORDER BY updated_at DESC",
+    ):
+        trade = json.loads(stored["payload_json"])
+        mt5_rows.append({
+            "id": f"MT5:{trade['trade_key']}",
+            "time": trade["last_time"],
+            "market_id": "fx_gold",
+            "symbol": trade["symbol"],
+            "side": trade.get("side", "—"),
+            "quantity": trade["volume"],
+            "price": None,
+            "gross_pnl": trade["profit"],
+            "commission": trade["commission"],
+            "swap": trade["swap"],
+            "other_fee": trade["fee"],
+            "net_pnl": trade["net_pnl"],
+            "source": trade["source"],
+            "category": trade["source"],
+            "note": f"{trade['deal_count']} 笔成交 · position {trade['position_id']}",
+            "status": "已归档",
+            "account_type": "MT5 Demo",
+            "currency": trade.get("currency", ""),
+        })
+    def activity_timestamp(row: dict[str, Any]) -> float:
+        value = row["time"]
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except ValueError:
+            return 0.0
+
+    items = sorted([*paper_rows, *mt5_rows], key=activity_timestamp, reverse=True)[:limit]
+    return {"items": items, "count": len(items)}

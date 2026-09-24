@@ -37,13 +37,13 @@ def main() -> None:
 
     adapter = Mt5DemoAdapter(ROOT / ".env")
     try:
-        account = adapter.connect_demo()
+        account = adapter.connect_demo(require_trading=True)
         print(
             f"Connected to MT5 Demo: login={account.login} server={account.server} "
             f"currency={account.currency} balance={account.balance}",
         )
         print(f"Submitting one {args.side} {args.symbol} order, volume={args.volume} lots")
-        opened = adapter.open_market(args.symbol, args.side, args.volume)
+        opened = adapter.open_market(args.symbol, args.side, args.volume, origin="TEST")
         print(f"OPEN accepted: order={opened.order_ticket} deal={opened.deal_ticket} price={opened.price}")
 
         position = adapter.wait_for_new_position(args.symbol)

@@ -175,9 +175,27 @@ class AuditStore:
             payload_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS mt5_trade_summaries (
+            account_login INTEGER NOT NULL,
+            trade_key TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (account_login, trade_key)
+        );
         """
         with self._lock, self.connection() as connection:
             connection.executescript(schema)
+            order_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(orders)").fetchall()
+            }
+            if "realized_pnl" not in order_columns:
+                connection.execute(
+                    "ALTER TABLE orders ADD COLUMN realized_pnl REAL NOT NULL DEFAULT 0",
+                )
+            if "net_pnl" not in order_columns:
+                connection.execute(
+                    "ALTER TABLE orders ADD COLUMN net_pnl REAL NOT NULL DEFAULT 0",
+                )
 
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
         with self._lock, self.connection() as connection:
@@ -193,6 +211,36 @@ class AuditStore:
             "INSERT INTO audit_events VALUES (?, ?, ?, ?, ?, ?)",
             (str(uuid.uuid4()), category, action, market_id, json.dumps(payload, ensure_ascii=False), utc_now()),
         )
+
+    def upsert_mt5_trade_summaries(
+        self,
+        account_login: int,
+        trades: list[dict[str, Any]],
+    ) -> None:
+        now = utc_now()
+        rows = [
+            (
+                int(account_login),
+                str(trade["trade_key"]),
+                json.dumps(trade, ensure_ascii=False),
+                now,
+            )
+            for trade in trades
+        ]
+        if not rows:
+            return
+        with self._lock, self.connection() as connection:
+            connection.executemany(
+                """
+                INSERT INTO mt5_trade_summaries
+                (account_login, trade_key, payload_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(account_login, trade_key) DO UPDATE SET
+                    payload_json=excluded.payload_json,
+                    updated_at=excluded.updated_at
+                """,
+                rows,
+            )
 
     def ensure_account(self, market_id: str, account_id: str, currency: str, balance: float) -> None:
         now = utc_now()

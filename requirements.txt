@@ -7,3 +7,4 @@ akshare>=1.18.0
 MetaTrader5>=5.0; platform_system == "Windows"
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<1.0
+pywebview>=6.2,<7; platform_system == "Windows"

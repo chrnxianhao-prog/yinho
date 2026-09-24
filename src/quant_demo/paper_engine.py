@@ -172,10 +172,17 @@ class PaperBroker:
                 ),
             )
             connection.execute(
-                "INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'FILLED', ?, ?, ?, ?, ?)",
+                """
+                INSERT INTO orders (
+                    order_id, market_id, account_id, instrument_id, raw_symbol, side,
+                    quantity, price, fee, status, source, idempotency_key, signal_id,
+                    note, created_at, realized_pnl, net_pnl
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'FILLED', ?, ?, ?, ?, ?, ?, ?)
+                """,
                 (
                     order_id, spec.market_id, spec.account_id, spec.instrument_id, spec.raw_symbol,
                     side, quantity, price, fee, source, idempotency_key, signal_id, note, now,
+                    realized_delta, realized_delta - fee,
                 ),
             )
             connection.execute(

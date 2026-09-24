@@ -6,7 +6,6 @@ if not exist ".venv\Scripts\python.exe" (
   pause
   exit /b 1
 )
-echo 正在启动多市场纸面交易终端...
-echo 关闭此窗口即可停止本地服务。
-".venv\Scripts\python.exe" "scripts\run_web.py" --host 127.0.0.1 --port 8787 --open-browser
-pause
+echo 正在启动 MT5 终端和银禾量化桌面工作台...
+".venv\Scripts\python.exe" "scripts\run_desktop.py"
+if errorlevel 1 pause

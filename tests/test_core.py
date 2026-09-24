@@ -81,6 +81,8 @@ class PaperBrokerTests(unittest.TestCase):
             source="TEST",
             idempotency_key="same-key",
         )
+        self.assertEqual(order["realized_pnl"], 0)
+        self.assertAlmostEqual(order["net_pnl"], -order["fee"])
         duplicate = self.broker.submit_market_order(
             spec=self.spec,
             side="BUY",
@@ -107,6 +109,10 @@ class PaperBrokerTests(unittest.TestCase):
             idempotency_key="close-next-day",
         )
         self.assertEqual(closed["status"], "FILLED")
+        self.assertAlmostEqual(
+            closed["net_pnl"],
+            closed["realized_pnl"] - closed["fee"],
+        )
 
     def test_kill_switch_rejects_order(self) -> None:
         self.store.set_risk_flags("stock_cn", True, False, "test")

@@ -4,9 +4,9 @@
 
 `AKShare / MT5 -> CSV -> 清洗 -> ParquetDataCatalog -> BacktestNode -> 双 EMA 策略`
 
-当前只做历史回测和纸面模拟，不连接真实下单接口，也不会发送真实订单。
+当前不连接任何实盘账户。A股/期货订单为本地 paper；MT5 仅允许经校验的 Demo 模拟账户下单。
 
-## 一体化多市场终端（已经可用）
+## 一体化多市场桌面终端
 
 项目现在提供电脑和手机自适应的一体化终端，包含：
 
@@ -22,20 +22,27 @@
 - SQLite 本地审计账本：`data/runtime/quant_demo.db`。
 - QMT/MiniQMT 和 CTP 接口就绪检查；未开户前保持 `RESERVED_ONLY`。
 - MT5 只接受 Demo 账户，QMT/CTP 实盘执行仍然锁定。
+- 双击 启动量化终端.bat 会启动或复用 .env 中 MT5_PATH 指向的 terminal64.exe，并打开独立桌面窗口。
+- 桌面窗口显示 MT5 Demo 余额、净值、浮动盈亏、保证金、可用保证金、占用率、保证金水平、净值回撤和风险分级。
+- MT5 Demo 成交与三个本地 paper 账户的订单统一归档，可按本人手动、AI/策略、测试和外部来源筛选。
+- MT5 已平交易净盈亏汇总：成交盈亏 + 佣金 + 隔夜利息 + 其他费用；paper 每笔订单保存已实现毛盈亏、模拟费用和扣费后净盈亏。
+- 风险档位为本软件提醒（保证金占用率 25/50/80%、净值回撤 5/10/20%），不等同于 Exness 的保证金警告或强平规则。
 
-最简单的启动方式是双击：
+桌面窗口启动方式（同时启动 MT5 terminal 和量化交易工作台）：
 
 ```text
 启动量化终端.bat
 ```
 
-也可以在 PowerShell 中运行：
+只启动浏览器版 paper 终端：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\run_web.py --open-browser
 ```
 
 页面地址：`http://127.0.0.1:8787`
+
+桌面窗口使用 pywebview；Windows 需 Microsoft Edge WebView2 Runtime。关闭量化窗口会停止本地 API，但不会自动关闭 MT5；下一次启动会复用相同路径下已运行的 terminal64.exe。
 
 ### 页面操作顺序
 
@@ -111,6 +118,7 @@ QUANT_PLUGIN_MODULES=my_indicators.custom_strength
 ├─ scripts/run_backtest.py    # BacktestNode 真实数据回测
 ├─ scripts/test_mt5_demo_order.py # 一次性 Demo 开平仓测试
 ├─ scripts/run_web.py         # 电脑/手机响应式 Web 终端
+├─ scripts/run_desktop.py     # 启动/复用 MT5 + 独立桌面窗口
 ├─ src/quant_demo/            # 配置、BarType、instrument、双 EMA 策略
 │  ├─ web_app.py              # Demo 下单 API
 │  ├─ web/index.html          # 响应式页面
@@ -128,6 +136,12 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
+```
+
+如果虚拟环境提示 No module named pip，先运行：
+
+```powershell
+./.venv/Scripts/python.exe -m ensurepip --upgrade
 ```
 
 Linux/macOS 的虚拟环境激活命令改为 `source .venv/bin/activate`；MetaTrader5 Python 包只在 Windows 路径安装，MT5 导出也建议在 Windows 执行。
@@ -229,8 +243,9 @@ python scripts/test_mt5_demo_order.py `
 
 ## 6. 电脑端 / 手机端下单页面
 
-项目提供一个响应式 Web 终端，同一页面可在电脑浏览器和手机浏览器使用。它只调用
-MT5 Demo 适配器，不连接实盘账户；页面支持查看账户、报价、持仓、买入、卖出和平仓。
+项目提供桌面窗口和响应式 Web 终端。同一页面可以在电脑/手机浏览器使用；桌面版启动时
+复用或启动 MT5 terminal，并开启本机窗口。MT5 下单只调用 Demo 适配器，不连接实盘账户。
+成交归档显示毛盈亏、佣金、隔夜利息、其他费用及净盈亏，并区分软件手动、AI/策略、MT5 终端手动/外部和 paper 来源。
 
 启动电脑本机访问：
 
