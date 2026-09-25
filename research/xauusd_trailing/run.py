@@ -41,6 +41,8 @@ def _write_result(result: Any, output_dir: Path, prefix: str = "") -> None:
     result.events.to_csv(output_dir / f"{stem}events.csv", index=False)
     result.equity.to_csv(output_dir / f"{stem}equity.csv", index=False)
     result.open_positions.to_csv(output_dir / f"{stem}open_positions.csv", index=False)
+    for name, report in result.reports.items():
+        report.to_csv(output_dir / f"{stem}{name}.csv", index=False)
     with (output_dir / f"{stem}summary.json").open("w", encoding="utf-8") as handle:
         json.dump(
             {"metrics": result.metrics, "audit": result.audit},

@@ -36,5 +36,6 @@ def run_walk_forward(
             "events": result.events,
             "equity": result.equity,
             "open_positions": result.open_positions,
+            "reports": result.reports,
         }
     return reports

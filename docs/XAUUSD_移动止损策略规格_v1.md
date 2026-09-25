@@ -1,354 +1,247 @@
 # XAUUSD 移动止损策略工程规格 v1
 
-状态：回测模块 v1 已实现并有自动化测试；规则按用户确认的默认口径执行。本文只覆盖历史回测和模拟盘，不包含实盘下单程序。
+状态：本次修订已实现回测和 Demo 规则，并由共享规则函数约束；回测不发订单，Demo 入口要求显式确认且受 Demo-only 校验保护。本文件同步记录旧口径和本次新口径。所有金额/交易结果都是配置下的研究模拟，不构成投资建议。
 
-## 1. 需求复述与澄清结论
+## 变更记录：旧口径与当前口径
 
-目标是把 XAUUSD 的 1H 区间过滤、1M/5M MACD 同向交叉、分批开仓、单向移动止损、周期限额和周末清仓规则，做成可复现、可审计、可作样本外评估的 Python 策略。
-
-| 项目 | 当前规格 | 状态 |
+| 主题 | 旧口径（已废止） | 当前口径 |
 |---|---|---|
-| 数据区间 | 2020-01-01 起，至 2025-01-01 止（结束时间不包含） | 已确认 |
-| 数据源 | MT5 导出的 XAUUSD M1、M5、H1 | 已确认；需审计实际覆盖范围 |
-| 交易时区 | `America/Mexico_City`；周期、检查和周末规则按墨西哥城当地民用时间解释，账本时间统一保存 UTC | 已确认 |
-| 区间 | 最近 5 根已收盘 H1 | 已确认 |
-| 信号 | 每 5 分钟检查；最近 5 分钟内 M1 与 M5 均出现同方向 MACD 交叉；MACD 12/26/9 | 已确认 |
-| 单次开仓 | 0.05 手 | 已确认；需核对券商最小手数和步长 |
-| 每周期开仓数 | 多空合计不超过 10 次 | 已确认 |
-| 总持仓 | 不设跨周期累计手数上限；即使旧仓仍在，也按新周期规则继续开仓 | 2026-09-24 最新确认，覆盖此前 0.50 手总仓上限 |
-| 资金 | 2,000 USD | 按默认假设；账户币种仍需对照 MT5 账户规格 |
-| 成本 | 佣金 0；固定完整点差 0.20 美元；单边滑点 0.10 美元 | 已确认；滑点单位按每盎司报价美元解释 |
-| 出场 | 不设止盈；只用初始止损和移动止损；不看反向指标 | 已确认 |
-| 移动止损 | 当地时间每小时 :00、:30 检查一次；只用上一根已收盘 M5 | 已确认 |
-| 止损后暂停 | 每周期第 10 次净亏损止损后暂停下一个完整五小时周期；盈利止损退出不计入 | 2026-09-25 最新确认 |
-| 周期锚点 | Demo 明早墨西哥城 09:00 开始一个新周期，之后每 5 小时刷新；已有仓位不阻止新周期开仓 | 2026-09-25 最新确认 |
-| 隔夜/周末 | 可隔夜；周末前主动清仓 | 已确认 |
-| 周末清仓时刻 | 周五 21:55 墨西哥城当地时间 | 已确认；成交报价必须在截止前且不陈旧 |
+| 休市 | 周五 21:55 `America/Mexico_City` 墙钟强平 | 不按墨西哥墙钟推断。回测由 M1 相邻 bar 间隔 >30 分钟识别休市；Demo 用交易时段或最近 20 个交易日最后 tick 推算，统一记 UTC/服务器时间 |
+| 休市动作 | 仅周末前尝试平仓 | 默认不允许跨任何已识别交易时段休市持仓；回测在休市前最后可成交 M1 bar 记 `SESSION_CLOSE`，Demo 在预计休市前 15 分钟开始主动平仓 |
+| 入场临近休市 | 原先只看周末截止 | 休市前 30 分钟禁止新开仓 |
+| 仓位 | 固定 0.05 手 | 默认按权益风险 0.5% 和初始止损距离下单量；超 8 美元止损距离或不足最小手数则跳过。仅风险比例设为 null 才用固定手数回退 |
+| 周期止损 | 达阈值后暂停下一个完整周期 | 默认 `current_cycle`：阈值在平仓所在周期触发后，本周期停止新开仓；也可选择 `next_cycle` 或 `both` |
+| 开仓/止损计数 | 共用 10 次口径 | 每周期开仓上限 10 次与亏损止损上限 10 次独立；盈利止损默认不计入亏损阈值，但同时输出全部止损数 |
+| 回测合约规格 | 允许合约大小空值并继续输出信号结果 | 回测必须提供 `contract_size_oz`，否则立即报错；不能遗漏止损计数或美元口径 |
+| 账户保护 | 无账户级熔断、保证金强平及 swap 模型 | 默认日亏损 3%、峰值回撤 10%只平不开；增加简化保证金/强平及可配置隔夜 swap 模型 |
+| MACD 时延 | 允许 M1 使用过去 5 分钟旧交叉 | 默认要求 M1 交叉为最近一根已收盘 M1 的交叉；M5 交叉仍须在最近 5 分钟窗口内 |
+| Demo 恢复 | 锁定无法自动恢复、状态只在内存、已有持仓拒绝启动 | 增加轮询恢复和手动复位、原子持久化及安全接管；状态文件缺失/损坏且已有本策略仓位时仍拒绝启动 |
 
-当前不生成投资建议。后续 AI 输出限于对规则状态、入场条件和已有持仓的解释或建议；下单执行边界另行授权。
+## 1. 需求复述与当前参数
+
+市场为 XAUUSD，技术栈 Python。信号只使用已收盘 H1/M1/M5；不使用 K 线形态、止盈、反向 MACD、中线反向信号或其他额外指标。多空可以同时持有；默认无策略层总手数上限，但有风险仓位、周期、账户熔断和保证金限制。
+
+| 配置 | 默认值 | 说明 |
+|---|---:|---|
+| 回测区间 | 2020-01-01 至 2025-01-01（结束不含） | UTC 数据；须验证覆盖 |
+| 初始资金/币种 | 2000 USD | 回测配置 |
+| 区间与信号 | 5 根已收盘 H1；MACD 12/26/9 | 每 5 分钟检查一次 |
+| 风险仓位 | 0.005；最大止损距离 8.0 USD | 按初始止损报价距离和合约大小计算 |
+| 周期额度 | 每 5 小时 10 次开仓、10 次亏损止损 | `stop_rule_scope=current_cycle`；盈利止损默认不算亏损止损 |
+| 成本 | 点差 0.20 USD；单边滑点 0.10 USD；佣金 0 | 配置模型，不等同历史真实报价 |
+| 休市控制 | 入场缓冲 30 分钟；Demo 强制平仓缓冲 15 分钟 | `allow_hold_through_session_break=false` |
+| 账户保护 | 日亏损 3%；峰值回撤 10% | 熔断后只平不开 |
+| 保证金 | 杠杆 100；margin call 100%；stop-out 50% | 简化模型，须用券商参数校准 |
+| swap | 多空默认 0；周三三倍 | 费率按每手每夜 USD 配置，必须用券商历史数据替代默认值 |
+| 最小止损距离 | 0 USD | 回测可配；Demo 还按券商 `trade_stops_level` 预检 |
+| 新闻窗口 | 空列表 | 手工维护 UTC `HH:MM-HH:MM`，仅阻止开仓 |
 
 ## 2. 策略规格说明书
 
-### 2.1 时间与周期
+### 2.1 时钟、交易周期与休市
 
-- 使用 IANA 时区键 `America/Mexico_City`，不把 UTC-6 写死。策略历史包含墨西哥城实行夏令时的年份；时区数据库应负责把历史本地时间正确映射为 UTC。
-- 例如 2024 年墨西哥城周五 21:55（UTC-6）对应 UTC 周六 03:55；2020–2022 的部分夏令时日期会对应 UTC 周六 02:55。周五 21:55 当地时刻可能晚于 XAUUSD 周末休市开始时间，必须用目标 MT5 账户的实际交易日历确定可成交的主动清仓时刻。
-- 原始 MT5 bar 时间转换成带时区的 UTC 时间后再排序、去重和计算。界面显示墨西哥城本地时间；所有数据库事件另存 UTC 时间戳。
-- 每 5 分钟在墨西哥城本地分钟为 `00、05、10、…、55` 的边界检查一次，只读取该时刻之前已收盘的 bar。每 30 分钟止损更新安排在本地 `:00` 和 `:30`。
-- 周期从配置锚点开始，每经过 5 小时刷新一次；本次 Demo 锚点为明早墨西哥城 09:00，后续边界为 14:00、19:00 等。历史回测锚点默认为 `2020-01-01 09:00` 本地时间。每个边界重置该周期的开仓额度；老仓跨周期继续独立移动止损，不阻止新周期按信号开仓。
-- 只有止损平仓的实际净盈亏小于 0 才计入亏损止损次数。MT5 按成交历史的 profit、commission、swap、fee 合计；回测按扣除点差、滑点和佣金后的 `net_pnl`。盈利或不亏损的止损退出不计数。第 10 次净亏损止损后，暂停紧接着的一个完整五小时周期；暂停期间已有持仓继续管理止损。
-- Demo 运行器不在明早 09:00 自动停止开仓或退出；策略会继续按周期运行，直到用户明确停止进程。停止进程不会主动平仓，已有服务器端止损仍保留在券商端，但进程停止后不会继续更新移动止损。
-- 2020-01-01 为预热期起点。指标先使用区间开始前可取得的数据预热；若数据不包含预热数据，则正式信号从满足所有窗口后的首个时点开始，不能把缺失历史补造出来。
+- 交易和事件账本使用 UTC/券商服务器时间；`America/Mexico_City` 只用于用户配置的五小时策略周期/展示，不再决定周末清仓时间。
+- 周期仍从 `cycle_anchor_local` 起每 5 小时滚动；每个周期单独计成功开仓数、亏损止损数、全部止损数及暂停状态。跨周期持仓继续管理；止损归属按实际平仓所在周期。
+- 回测从 M1 bar 开始时间序列推断休市：相邻 bar 间隔严格大于 30 分钟即为休市。最后可成交 bar 为缺口前最后一根 M1，结束时刻为该 bar 开始时间 +1 分钟。休市前 30 分钟不发新入场；默认最后一根可成交 bar 按该 bar 收盘价模型主动平掉全部仓位，原因为 `SESSION_CLOSE`，不计入止损数。`allow_hold_through_session_break=true` 时不主动清仓，但默认仍禁止休市前新入场。
+- `session_close_buffer_minutes=15` 是 Demo 主动平仓的计划窗口；离线回测为了满足因果与数据可成交性，以实际缺口前最后一根 M1 执行强平，而不是在缓冲窗口起点虚构报价。
+- Demo 优先使用券商/终端明确提供的交易时段扩展；其次使用最近 20 个交易日每日最后 tick，按星期估算下一次休市时刻。日志和心跳必须带 `SYMBOL_INFO_TRADE_SESSIONS`、`OBSERVED_LAST_TICK_20_TRADING_DAYS` 或 `UNAVAILABLE` 来源。不可用时禁止新开仓，不推测一个时间继续交易。
+- 标准 MetaQuotes Python `symbol_info` 文档列出的是品种属性，并未承诺暴露每周交易时段；`session_open/session_close` 也可能是价格字段，不能当作时钟。实现只有在运行环境明确暴露交易时段接口时才使用，否则安全回退到最近 tick 观测。[MetaQuotes `symbol_info`](https://www.mql5.com/en/docs/python_metatrader5/mt5symbolinfo_py)、[MetaQuotes symbol properties](https://www.mql5.com/en/docs/constants/environment_state/marketinfoconstants)
 
-### 2.2 H1 区间
+### 2.2 H1 中线
 
-在检查时刻 `t`，选出收盘时间 `<= t` 的最近 5 根 H1 bar，记为 `H1…H5`、`L1…L5`：
+令 `H1...H5`、`L1...L5` 为决策时点之前最近 5 根完整 H1 的 high/low：
 
 ```text
-range_high(t) = max(H1, H2, H3, H4, H5)
-range_low(t)  = min(L1, L2, L3, L4, L5)
-avg_high(t)   = (H1 + H2 + H3 + H4 + H5) / 5
-avg_low(t)    = (L1 + L2 + L3 + L4 + L5) / 5
-midline(t)    = (avg_high(t) + avg_low(t)) / 2
+range_high = max(H1, H2, H3, H4, H5)
+range_low  = min(L1, L2, L3, L4, L5)
+avg_high   = (H1 + H2 + H3 + H4 + H5) / 5
+avg_low    = (L1 + L2 + L3 + L4 + L5) / 5
+midline    = (avg_high + avg_low) / 2
 ```
 
-实际做多做空条件只用 `midline`；`range_high` 和 `range_low` 为区间输出与审计字段，不作为额外入场或出场条件。少于 5 根已收盘 H1 bar 时不交易。
+区间上下界供审计；当前入场方向过滤只比较执行时可用价格与 `midline`。每根 H1 只有在 `bar_open + 1h <= decision_time` 后才可用。
 
-### 2.3 MACD 与入场信号
+### 2.3 MACD、检查时刻与入场
 
-对每个周期分别用收盘价计算：
+MACD 使用收盘价与参数 `(12,26,9)`，M1/M5 独立计算。定义金叉为 MACD 从不高于 signal 转为高于 signal；死叉相反。信号时间是确认交叉的已收盘 bar 时间。
 
 ```text
-macd_line = EMA(close, 12) - EMA(close, 26)
-signal_line = EMA(macd_line, 9)
-histogram = macd_line - signal_line
+每 5 分钟检查一次，使用决策时刻前可用的报价与指标：
+  LONG  当 price > midline，最新 M1 已收盘 bar 有金叉，且 M5 最近 5 分钟有金叉
+  SHORT 当 price < midline，最新 M1 已收盘 bar 有死叉，且 M5 最近 5 分钟有死叉
 ```
 
-复现约定：EMA 使用递归系数 `alpha=2/(period+1)`；初值取首个完整周期的简单平均，MACD signal EMA 从首个有效 MACD 值开始累计并在 9 个有效值后输出。MT5 内置指标若采用不同初始化方式，应做逐 bar 对照并记录差异；策略计算不切换初始化口径。
+默认 `require_latest_m1_cross=true`，因此 M1 交叉必须来自最近一根已收盘 M1 bar；此设置优先于 M1 的 5 分钟旧交叉窗口。M5 交叉时间必须在决策时间往前 5 分钟范围内。未来交叉不得用于当前决策。已消费的交叉不会重复使用；因风险手数不足而 `ENTRY_SKIPPED_RISK` 的信号不消费交叉。成功下单/回测成交后才消费对应 M1/M5 cross ID。
 
-交叉按已收盘 bar 定义：
+入场前按顺序检查：Demo/状态/下单锁定、账户熔断、UTC blackout、休市前禁入、周期亏损止损暂停、周期开仓额度、最小止损距离、止损所在方向、按风险计算手数、保证金/券商预检。拒绝/跳过事件保留数值和原因。
+
+### 2.4 风险仓位和初始止损
+
+多单初始止损为最近一根已收盘 M5 的 low；空单为该 bar 的 high。令 `D` 为入场可执行市场报价与初始止损的正向距离，`E` 为下单前账户权益，`C` 为每手合约盎司数，`r` 为风险比例，`v_min` 和 `v_step` 为券商最小手数和步长：
 
 ```text
-golden_cross(t) = macd_line[t-1] <= signal_line[t-1]
-                  and macd_line[t] > signal_line[t]
-dead_cross(t)   = macd_line[t-1] >= signal_line[t-1]
-                  and macd_line[t] < signal_line[t]
+risk_budget_usd = E * r
+raw_lots = risk_budget_usd / (D * C)
+lots = floor(raw_lots / v_step) * v_step
 ```
 
-每个检查时刻 `t`，在时间闭区间 `[t-5min, t]` 查找已确认交叉：
+若 `risk_per_trade_pct=null` 才改用 `entry_lots` 固定回退。风险比例有效时，固定手数不覆盖风险算法。`lots < v_min`、`D > max_stop_distance_usd`、止损无效或缺少合约大小时不建仓。风险手数不足或止损超过最大距离记 `ENTRY_SKIPPED_RISK`，且不消费交叉；低于券商最小止损距离记 `ENTRY_REJECTED`。回测从配置读取 `volume_min_lots`、`volume_step_lots`；Demo 从 `symbol_info` 读取手数约束、合约大小和券商 stops level。
 
-- 做多：最新可用价格 `P(t) > midline(t)`，M1 有金叉，M5 有金叉。
-- 做空：`P(t) < midline(t)`，M1 有死叉，M5 有死叉。
-- `P(t) == midline(t)` 时不产生新入场。
-- 做多与做空可以分别持有；总手数按 `sum(abs(position.lots))` 计算。
-- 默认工程假设：一个 MACD 交叉事件最多被使用一次；M1、M5 交叉各自保存时间戳，开仓幂等键由两个交叉时间、方向和策略版本组成。这样一个持续落在 5 分钟窗口内的旧交叉不会在后续检查重复开仓。
-- 默认工程假设：只有实际成交的 0.05 手开仓才消耗一次周期开仓额度；因总手数上限、无效止损、数据缺失或风控拒绝的信号记为拒绝事件，不占已成交开仓次数。
-- 入场方向和信号不得引用形成中的 M1/M5/H1 bar。MT5 bar 时间是 bar 开始时刻；M1 的 `time=t-1min` bar 在 `t` 时才完整收盘。
+### 2.5 移动止损、出场与周期止损规则
 
-### 2.4 开仓与初始止损
-
-每次开仓固定 0.05 手。开仓前同时检查：周期开仓计数小于 10；存在完整信号；初始止损在可接受的一侧；数据没有断档；当前不是周末清仓禁入窗口。持仓手数不作为拒绝新开仓的条件；未平仓头寸跨周期累积时，总暴露可超过此前的 0.50 手。
-
-- 多单初始止损：开仓决策时刻前最近一根已收盘 M5 的最低价。
-- 空单初始止损：开仓决策时刻前最近一根已收盘 M5 的最高价。
-- 若多单参考低点不低于可成交 Bid，或空单参考高点不高于可成交 Ask，视作止损无效，拒绝开仓并记审计原因；不把止损移到更差的位置。
-- 回测信号在已收盘 bar 上确认，成交使用下一条可用 M1 bar 的开盘报价；不得用刚用于生成信号的收盘价假设成交。
-
-### 2.5 移动止损与平仓
-
-每个持仓腿独立维护止损价 `S`。仅在墨西哥城每小时 `:00` 或 `:30` 的更新事件运行：
+固定 UTC 每小时 `:00`、`:30` 检查，使用上一根已收盘 M5。止损只收紧：
 
 ```text
-candidate_long  = previous_closed_M5.low
-new_long_stop   = max(old_stop, candidate_long)
-
-candidate_short = previous_closed_M5.high
-new_short_stop  = min(old_stop, candidate_short)
+多单：new_stop = max(old_stop, previous_closed_M5.low)
+空单：new_stop = min(old_stop, previous_closed_M5.high)
 ```
 
-- 若候选止损在当前可成交报价的错误一侧，则不追价、不放宽原止损，记录 `TRAIL_UPDATE_SKIPPED_MARKET_SIDE`。
-- 止损更新只在该时刻生效，不能回头使用更新前已经发生的 bar 高低价触发新止损。
-- 止损触发后以市价模拟平仓，不设止盈。多单用 Bid 触发和卖出；空单用 Ask 触发和买入。
-- 只有因该止损价触发而平仓的交易，`close_reason=STOP_LOSS`。若该腿实际净盈亏小于 0，增加当期亏损止损计数；净盈亏大于等于 0 时仍记为止损出场，但不计入暂停阈值。
-- 周末主动清仓标记为 `FORCED_WEEKEND_CLOSE`；不计入亏损止损次数、不触发暂停，但记录为主动平仓及费用事件。
-- 周期切换只重置当期已成交开仓数和当期亏损止损数；旧持仓及其止损状态延续。
-- 亏损止损按实际平仓成交所在的墨西哥本地周期计数；旧持仓在新周期止损时，计入新周期。
+不设止盈、不看反向信号。止损触发后按不利方向滑点的市价模型平仓。Demo 通过适配器坚持只收紧，不放松服务端止损；保留原有 Demo-only、对冲账户校验、下单前预检和不确定成交时锁定保护。
 
-### 2.6 成交成本与账户模型
+每周期成功入场上限 `max_entries_per_cycle=10` 与亏损止损阈值 `max_losing_stops_per_cycle=10` 是独立计数。每次止损事件都增加“全部止损数”；净 `net_pnl<0` 才默认增加“亏损止损数”。`count_profitable_stops=true` 时，全部止损数也参加暂停阈值，但仍分别展示两类数量。
 
-默认输入为 Bid OHLC、固定完整点差 `0.20 USD/oz`、单边滑点 `0.10 USD/oz`、佣金 0。定义 `mid = bid + spread/2`：
+`stop_rule_scope` 定义达到阈值时停止开仓的周期：
 
-```text
-Ask = Bid + 0.20
-买入成交价 = Ask + 0.10
-卖出成交价 = Bid - 0.10
-多单平仓价 = Bid - 0.10
-空单平仓价 = Ask + 0.10
-```
+- `current_cycle`（默认）：平仓所在周期剩余时间不再开仓。
+- `next_cycle`：暂停后一个完整周期，为旧版行为兼容选项。
+- `both`：当前剩余周期和下一个完整周期都暂停。
 
-止损跨价跳空时，不假设按止损价成交：多单若 M1 开盘 Bid 已低于止损，按开盘 Bid 再减滑点；空单若 M1 开盘 Ask 已高于止损，按开盘 Ask 再加滑点。否则按止损触发价加减滑点。点差和滑点分开记录，不能重复扣减。
+阈值由止损实际平仓时刻所属周期决定。上一周期开仓的仓位若在当前周期止损，计入当前周期止损数并可能停止当前周期开仓。主动 `SESSION_CLOSE`、`MARGIN_STOP_OUT` 不记为止损。
 
-盈亏计算需要 `contract_size_oz_per_lot`。以 mid 价格变化计算毛盈亏，再单独扣一次点差与滑点，避免成交价已含成本后重复扣费：
+### 2.6 账户级熔断、保证金和 swap
 
-```text
-多单毛盈亏 = lots * contract_size_oz_per_lot * (exit_mid - entry_mid)
-空单毛盈亏 = lots * contract_size_oz_per_lot * (entry_mid - exit_mid)
-净盈亏 = 毛盈亏 - spread_cost - slippage_cost - 佣金 - swap - 其他已配置费用
-```
+- 当日亏损以 UTC 服务器交易日为界，按该日开始权益比较当前已实现+浮动净值；达到 `max_daily_loss_pct` 即 `RISK_HALT`。回测下一个 UTC 日期解除；Demo 保持到下一服务器日，或操作者显式 `--reset-risk-halt`。
+- 峰值回撤为 `(equity_peak - equity) / equity_peak`；达到 `max_drawdown_pct` 后同样只平不开。熔断期间持续管理现有仓位及止损，心跳暴露状态。
+- 保证金占用按 `lots × contract_size_oz × mark_price / leverage` 简化估算；保证金水平为 `equity / used_margin × 100%`。达到 margin call 记录事件，低于/达到 stop-out 阈值时按最差浮动盈亏逐腿平仓，原因为 `MARGIN_STOP_OUT`。此模型不是券商逐 tick 强平的精确复制。
+- 持仓跨越 UTC 服务器日时，按方向收取配置的每手每夜 swap；`triple_swap_weekday` 默认 2（Python weekday：周三）。回测不跨周末持仓的默认策略通常会减少周末计费，但实际日历及经纪商三倍计费日须核验。零费率是示例默认，不代表无融资成本。
 
-实际 Bid/Ask 成交价仍用于止损触发和模拟撮合；`spread_cost` 与 `slippage_cost` 作为独立账本字段列示，不再从已含这些成本的成交价盈亏重复扣除。跳空造成的止损成交价格变化计入实际行情价格变动，额外执行滑点仍按不利方向计成本。
+### 2.7 成本、报价和 UTC blackout
 
-不硬编码一手等于多少盎司。回测启动时从 MT5 导出的合约规格或 `symbol_info` 导入合约大小、最小/最大手数、手数步长、tick size/value 和账户币种。没有合约大小时可以验证信号和订单时序，但不得发布以美元计的盈亏、收益率或风险指标。
+回测默认 Bid OHLC，完整固定点差 `spread_usd=0.20`，每边滑点 `slippage_usd_per_side=0.10`，单边每手佣金 `commission_usd_per_lot_side=0`。买入按 Ask、卖出按 Bid 处理；成本拆分记录，不重复扣减。手续费、点差、滑点均可配置，另提供机械成本翻倍敏感性结果。
 
-初始净值暂设 2,000 USD。当前规则不设跨周期总手数上限；每周期最多开 10 次、每次 0.05 手，但未平仓头寸跨周期累积时，总暴露可继续增长。回测不模拟无限杠杆；保证金占用、强平和账户杠杆须另行纳入，不能据此假定账户可承受累积仓位。允许隔夜；隔夜 swap 尚未提供，不能把当前 swap 值伪装成 2020–2024 历史值。第一版分别报告“不含 swap 的基础结果”和 swap 成本敏感性；拿到有日期的历史 swap 序列后再给完整净值结果。
+`blackout_windows` 格式为 UTC `HH:MM-HH:MM`，开始包含、结束不包含，支持跨午夜，仅禁新开仓；默认空列表，新闻时段由用户手工维护，不调用新闻源。
 
 ## 3. 数据字段定义
 
-### 3.1 原始 bar 字段
+### 3.1 bar 输入
 
-| 字段 | 类型 | 说明 |
+| 字段 | 类型 | 定义 |
 |---|---|---|
-| `timestamp_utc` | datetime64[ns, UTC] | MT5 bar 开始时间；唯一索引 |
-| `open`, `high`, `low`, `close` | float64 | XAUUSD 报价；需确认 MT5 导出 OHLC 是 Bid |
-| `tick_volume` | int64 | MT5 tick volume；仅数据质量/诊断，不参与策略规则 |
-| `spread_points` | int64/float | MT5 导出点差；固定点差假设回测时保留作对照，不与固定点差重复计费 |
-| `real_volume` | int64 | 若有则保留；不作为 FX/CFD 真实成交量假设 |
-| `source_time_zone` | string | 数据导出时区声明，建议 `UTC` |
-| `source_file`, `source_row` | string/int | 可追溯到输入文件行 |
+| `timestamp_utc` | UTC datetime | bar 开始时间，唯一且递增 |
+| `open/high/low/close` | float | 品种报价 OHLC，配置声明 Bid/Ask 侧 |
+| `tick_volume` | int | tick 数/数据质量字段，不作为真实成交量 |
+| `spread_points` | numeric | MT5 导出原始 spread，保留作审计，不与固定点差重复扣费 |
+| `real_volume` | numeric | 若有则保留，不假定 CFD 成交量 |
+| `source_file/source_row` | string/int | 可追溯源文件和行 |
 
-### 3.2 派生字段与事件字段
+### 3.2 策略/账本字段
 
-| 字段 | 说明 |
-|---|---|
-| `bar_close_time_utc` | `timestamp_utc + timeframe`；只有此时刻不晚于决策时刻才算已收盘 |
-| `timestamp_mexico` | UTC 转换后的本地展示时间，保留 UTC offset 与 DST fold 信息 |
-| `macd`, `macd_signal`, `macd_hist` | 1M/M5 两套指标，分别计算，不混用周期 |
-| `cross_type`, `cross_time_utc`, `cross_id` | 金叉/死叉、确认时间、不可重复消费的信号 ID |
-| `range_high`, `range_low`, `avg_high`, `avg_low`, `midline` | 最近 5 根已收盘 H1 的区间字段 |
-| `decision_time_utc`, `decision_time_mexico` | 检查时间的双时区记录 |
-| `signal_direction`, `signal_reason` | LONG/SHORT/NONE 及通过/拒绝原因 |
-| `order_id`, `position_id`, `side`, `lots` | 模拟订单和独立持仓腿 |
-| `entry_bid`, `entry_ask`, `entry_fill`, `initial_stop`, `active_stop` | 入场报价、成交价、初始和当前止损 |
-| `exit_fill`, `close_reason` | 平仓成交价；`STOP_LOSS` 或 `FORCED_WEEKEND_CLOSE` |
-| `gross_pnl`, `spread_cost`, `slippage_cost`, `commission`, `swap`, `net_pnl` | 逐腿成本与盈亏审计字段 |
-| `cycle_id`, `entries_in_cycle`, `losing_stops_in_cycle`, `paused_until` | 本地周期、开仓和净亏损止损计数及暂停状态 |
-| `strategy_version`, `config_hash`, `data_hash` | 复现策略配置和输入数据 |
+至少保存 bar 收盘 UTC、1M/5M MACD 及交叉 ID、H1 range/midline、决策时间、方向/理由、持仓 ticket、手数、入场/止损/出场价和原因、周期 ID、周期入场/亏损止损/全部止损计数、已消费 cross、熔断/锁定、止损风险美元和 R 倍数、gross/spread/slippage/commission/swap/net PnL、MAE/MFE、配置/数据哈希。Demo `state.json` 还保存最后处理成交 ticket、已有本策略仓位标识和恢复所需状态。
 
-### 3.3 数据质量门槛
+### 3.3 数据完整性
 
-- 三种周期按 UTC 排序，检查重复时间、OHLC 合法关系、负/零价格、缺失区间、异常时区偏移和时间戳单位。
-- 由 M1 按 MT5 周期边界聚合 M5/H1，与独立导出的 M5/H1 对比 OHLC；差异生成报告。策略计算统一使用同一套边界，避免三份文件错位。
-- 不把周末、节假日和日内休市的正常空档当成缺失 bar；另用交易时段日历区分正常休市与数据缺失。
-- 缺失数据期间禁止新开仓。若止损可能触发但没有可执行报价，标记 `DATA_GAP_STOP_UNCERTAIN`，不得静默按有利价格填单；保守统计按最坏可验证报价或将该段列为不可评估。
-- MT5 Python 的历史接口返回 bar 开始时间并按 UTC 保存；导出流程需写清数据时区，不能把无时区时间戳直接当本机时间。[MetaTrader 5 `copy_rates_range` 文档](https://www.mql5.com/en/docs/python_metatrader5/mt5copyratesrange_py)
+- 检查时间排序、重复记录、OHLC 高低关系、正价格、UTC 标注及区间覆盖。
+- 由完整 M1 窗口聚合 M5/H1 并与 MT5 独立导出数据审计；保留 spread 列。
+- 大于 30 分钟的 bar 间隔作为交易休市用于会话边界；非休市数据缺口若影响持仓止损路径须标注不可核验，禁止伪造有利成交。
+- MT5 `copy_rates_range` 返回 UTC 时间范围；导出时显式指定 UTC 并检查首尾覆盖。[MetaQuotes `copy_rates_range`](https://www.mql5.com/en/docs/python_metatrader5/mt5copyratesrange_py)
 
 ## 4. 伪代码
 
 ```text
-load config, symbol specification, timezone database version
-load M1/M5/H1; normalize all timestamps to UTC
-validate data; aggregate M5/H1 from M1 and compare with exported bars
-warm up EMA/MACD using pre-test history
-positions = []
+load config; reject backtest if contract_size_oz is missing
+load and audit UTC M1/M5/H1; assert aggregate and prefix-causal integrity
+infer M1 session breaks where adjacent bar starts differ by >30 minutes
 
-for each UTC minute event t in test interval:
-    local_t = t converted with America/Mexico_City
+for each M1 event:
+    update existing stop fills, swap, equity and margin state
+    derive current five-hour cycle and server trading date
+    if daily loss or peak drawdown threshold reached: set RISK_HALT (close-only)
+    on UTC :00/:30: monotonically tighten stops from previous closed M5
+    if this is last M1 before an inferred break:
+        close all at this bar; label SESSION_CLOSE; do not count stop
+    at each 5-minute entry check:
+        if any shared entry gate blocks: record reason and continue
+        require price vs H1 midline and unused same-direction M1/M5 crosses
+        validate stop side and broker/configured minimum distance
+        size from current equity, stop distance, contract size and lot step
+        if risk sizing fails: record ENTRY_SKIPPED_RISK; leave crosses unused
+        check available margin; otherwise record fill and consume crosses
+    on STOP_LOSS: count total and net-losing stops in exit cycle
+        apply current_cycle / next_cycle / both halt scope at configured threshold
 
-    if t is scheduled weekly flatten deadline:
-        close all positions at the last executable quote at/before deadline
-        label FORCED_WEEKEND_CLOSE; do not count as stop
-
-    update/trigger existing stops using only prices available at t
-    if local_t is :00 or :30:
-        candidate = previous fully closed M5 low/high
-        tighten each stop monotonically; never loosen
-        apply new stop only from this event onward
-
-    if local_t is a 5-minute check boundary:
-        derive current local cycle_id and its quota/pause state
-        if paused, at weekly flatten cutoff, or data is incomplete: record skip
-        else:
-            calculate midline from last 5 closed H1 bars
-            find unused M1 and M5 crosses in [t-5min, t]
-            if price > midline and both crosses are bullish:
-                if entries < 10:
-                    create 0.05-lot LONG at next available M1 open + ask/spread/slippage
-                    initial stop = previous closed M5 low
-                    reject if initial stop is not below executable market side
-                    increment entry count only on successful simulated fill
-            elif price < midline and both crosses are bearish:
-                symmetric SHORT entry with previous closed M5 high
-
-    on a STOP_LOSS fill:
-        increment stops_in_cycle for the cycle containing the close event
-        if stops_in_cycle == 10:
-            pause the next complete local cycle; continue managing existing stops
-
-at end of sample:
-    mark remaining positions to market for open-position metrics
-    do not silently force-close them at the sample endpoint
-    emit trades, equity curve, costs, rejects, pause events, and data audit
+emit trades, events, daily equity, open positions, audits and split reports
 ```
 
-若同一 M1 bar 的 OHLC 同时满足止损更新前后可能的不同路径，使用只会更不利于策略的成交假设，并将该次歧义单独计数。历史 M1 OHLC 不包含 bar 内 tick 顺序，不能声称还原了真实止损成交路径。
+## 5. 回测、未来函数和过拟合方案
 
-## 5. 回测方案
-
-### 5.1 成交与市场成本
-
-- 主回测以 M1 为事件时钟；M5/H1 用于信号、区间和止损更新。
-- 使用 Bid OHLC 构造 Ask=Bid+0.20；逐次成交再应用每边 0.10 美元滑点，佣金设为 0。
-- 止损触发以可执行一侧报价判断；有跳空时按下一可执行开盘价成交并加不利滑点。
-- 周末清仓必须落在有效且足够接近截止时间的报价。实现默认只接受截止前 5 分钟内的最后一根 M1 收盘；若 21:55 已休市且最后报价更早，则不虚构成交，标记 `WEEKEND_CLOSE_UNVERIFIABLE`、保留未平仓并将回测标记为不可用于绩效审查。取得目标账户交易日历后，可按真实最后可成交时间配置，不把陈旧价格冒充成交。[Exness 工具交易时间](https://get.exness.help/hc/en-us/articles/4405235684498-Instrument-trading-hours)
-- 可隔夜意味着跨日持仓会继续承受敞口；swap 历史缺失时要单独报告，不并入“完整成本”结果。
-
-### 5.2 样本切分与过拟合控制
-
-按 UTC 日期切分，区间结束日不包含：
-
-| 数据集 | 日期 | 用途 |
-|---|---|---|
-| 开发/训练 | 2020-01-01 至 2023-01-01 | 验证实现、只在此范围做有限参数敏感性 |
-| 验证 | 2023-01-01 至 2024-01-01 | 选择冻结配置，不继续反复试参 |
-| 最终样本外 | 2024-01-01 至 2025-01-01 | 只运行一次冻结配置并报告，不用于调参 |
-
-另外做滚动前推：训练窗口扩展到某个日期，下一段作为未见期；每个折叠分别记录结果。MACD 默认参数和用户规则先作为基准，不因 OOS 表现不好再改完重测并把新结果称为样本外。若比较大量候选参数，增加 PBO/CSCV 或 Deflated Sharpe 类多重试验偏差评估；同时报告尝试过的参数数目。
-
-### 5.3 未来函数检查
-
-- **已收盘约束：** 每个信号的所有来源 bar 的 `bar_close_time <= decision_time`。
-- **前缀一致性：** 对任一历史时刻，只用截至该时刻的数据重算，过去的信号、区间和止损不得改变。
-- **未来扰动测试：** 修改检查时刻之后的 OHLC，时刻之前的指标和订单必须完全不变。
-- **执行延后一根：** 入场不得在产生交叉的同一根 bar 收盘价成交；成交落在下一可用 M1 开盘。
-- **止损顺序：** 更新时只用上一根完整 M5；新止损不能在生效前被同根历史低/高价触发。
-- **切分隔离：** 标准化、参数选择、缺失值规则和成本校准不得读取最终 OOS 数据。
-
-### 5.4 指标口径
-
-- 年化收益：从逐日净值曲线计算，明确按日历年化因子；未平仓按可成交方向盯市。
-- 夏普：按日净收益计算，列明无风险利率假设（基准取 0）及年化因子。
-- 最大回撤：净值相对历史峰值的最大百分比回撤。
-- 胜率：已平仓持仓腿中净盈亏大于 0 的比例；同时列出未平仓数量。
-- 盈亏比：平均盈利持仓腿净盈亏 / 平均亏损持仓腿净盈亏绝对值。
-- 止损出场总数：统计全部 `STOP_LOSS`；暂停阈值另只统计净亏损的止损出场；`FORCED_WEEKEND_CLOSE` 单列。
-- 换手率：报告成交总名义金额 / 时间加权平均净值，并同时给开仓次数和总手数，方便解释口径。
-- 附加审计：总交易数、方向分布、成本拆分、最长持仓、隔夜次数、周期额度拒绝数、暂停周期数、数据缺口数、强制周末平仓数、期末未平仓数。
-- 结果分训练、验证、OOS 和滚动前推各表展示，并附净值曲线、逐笔交易和配置/数据哈希。
+- 事件时钟为 M1；M5/H1 只用于已经收盘的数据。MACD/中线前缀因果断言及未来 OHLC 扰动测试必须通过。
+- M1 入场以可用 bar 开盘价格模型成交，不用刚生成信号的未来收盘；止损更新只在事件时刻后生效。OHLC 不含 bar 内路径，无法证明真实 tick 先后顺序，需报告不确定性。
+- 每笔交易单独保存入场初始风险 `initial_risk_usd`，`R = net_pnl / initial_risk_usd`；不同美元风险的交易不能只按金额比较。
+- 样本区间默认按 UTC：2020–2022 开发、2023 验证、2024 最终 OOS（以 2025-01-01 截止）。参数先冻结再评估 OOS；报告滚动前推。若做大量参数搜索，还需多重试验/PBO 或 Deflated Sharpe 评估；不得把重复调参后的 OOS 当未见数据。
+- 报告包括年化收益、日频 Sharpe（252 年化，零无风险率）、最大回撤、胜率、平均盈利/亏损比、止损数、换手率、R 分布、前 5 盈利交易利润集中度、多空拆分、分年和上涨/震荡/下跌状态、成本翻倍敏感性、MAE/MFE、每周期入场和止损数、swap、保证金强平与休市/风险事件。
+- 成本翻倍是对已成交路径的机械敏感性，不会重新跑不同成本下的交易决策/止损路径；不可当作完整二次撮合回测。
 
 ## 6. Python 工程框架
 
-实际模块已建于 `research/xauusd_trailing/`：
-
 ```text
 research/xauusd_trailing/
-├── README.md                 # 数据约定、限制和运行说明
-├── config.example.yaml       # 策略、数据路径与输出；不含凭据
-├── models.py                 # 回测配置
-├── data.py                   # MT5 CSV 导入、UTC 归一化、数据审计
-├── indicators.py             # SMA-seeded EMA/MACD 与 H1 区间
-├── causality.py              # 未来数据扰动/前缀一致性检查
-├── engine.py                 # M1 事件驱动撮合、持仓和周期风控
-├── metrics.py                # 收益、Sharpe、回撤、胜率、盈亏比、换手
-├── walk_forward.py           # 2020–2022 开发、2023 验证、2024 OOS
-└── run.py                    # CSV → 回测 → 审计文件；不连接 MT5
-
-自动化测试位于 `tests/test_xauusd_backtest.py`。运行命令和测试口径见模块 README。
+  models.py             # 配置模型与默认值
+  data.py               # CSV 读取、UTC 归一化和 M1/M5/H1 审计
+  indicators.py         # H1 区间、MACD 与周期时间
+  rules.py              # 回测/Demo 共用的纯策略规则
+  sessions.py           # M1 休市推断和 Demo 休市时刻来源
+  engine.py             # M1 事件驱动回测、成本、保证金和 swap
+  metrics.py            # 指标和诊断统计
+  demo_runner.py        # Demo 状态恢复、心跳和策略调度
+  walk_forward.py       # 开发/验证/OOS 分段
+  run.py                # 离线回测入口
+  config.example.yaml   # 无凭据策略配置
+scripts/
+  export_xauusd_mt5_history.py  # Demo 终端只读导出 M1/M5/H1
+  run_xauusd_demo_strategy.py   # 显式确认后的 Demo 入口
+  xauusd_watchdog.py            # 只检查心跳，不执行交易操作
+tests/
+  test_xauusd*.py       # 不依赖 MT5 的规则、引擎与假 adapter 测试
 ```
 
-配置文件包含 `timezone=America/Mexico_City`、`check_interval=5m`、`range_bars=5`、`macd=(12,26,9)`、`entry_lots=0.05`、`max_entries_per_cycle=10`、不设跨周期总持仓上限、`initial_equity=2000 USD`、`spread_usd=0.20`、`slippage_usd=0.10`、`commission=0`、样本日期和周末平仓政策。MT5 登录信息不参与回测配置。
+回测：`python -m research.xauusd_trailing.run --config research/xauusd_trailing/config.example.yaml`。Demo：`python scripts/run_xauusd_demo_strategy.py --confirm-demo-strategy`。数据导出需 `--confirm-demo-read`，且只读。README 提供数据准备、运行与安全细节。
 
 ## 7. 风控与暂停逻辑
 
-1. 不设多空合计总手数上限；每个本地五小时周期仍最多开仓 10 次，每次固定 0.05 手。跨周期遗留仓位可能令总暴露继续累积。
-2. 每笔独立持仓腿固定 0.05 手，独立保存信号来源、入场价、止损和出场原因。
-3. 每个本地周期成功成交的开仓最多 10 次；平仓不会恢复本周期开仓额度。
-4. 每个周期统计净亏损的 `STOP_LOSS` 平仓；盈利止损不计数。第 10 次亏损止损后将下个完整五小时周期加入暂停表。
-5. 周期刷新后，旧仓位不阻止新仓；暂停时仅拒绝新开仓，继续管理已有仓位止损；暂停周期结束后按周期边界恢复。
-6. 主动周末平仓不算止损；其它原因的主动平仓如果未来加入，也必须有独立原因枚举，不能写成止损。
-7. 报价缺失、时区不明、MACD 不完整、合约规格缺失或订单步长不合法时拒绝新开仓，并写明拒绝原因。
-8. 本策略不含止盈、反向 MACD 平仓、中线反向平仓、加仓以外的指标过滤或 AI 自行改规则。
-9. 这一版最大手数限制不等于经纪商保证金风控；在确认杠杆/保证金规格前，不把回测结果描述为可承受真实账户回撤。
+1. 手数依止损距离风险定额；最大止损距离、最小手数/步长和合约大小缺失都会阻止开仓。
+2. 每周期最多 10 次开仓，与每周期最多 10 次亏损止损分开统计；三种 stop scope 由共享函数处理。
+3. 默认 `current_cycle` 的亏损止损计数归于平仓周期，因此老仓在新周期亏损止损也影响新周期入场资格。
+4. 账户日亏损/峰值回撤任一熔断后只平不开；Demo 可等新 UTC 服务器日或手动复位，状态写入心跳和 state 文件。
+5. 休市前 30 分钟停止新开仓；回测缺口前最后可成交 bar 清仓；Demo 使用券商时段或最近 20 个交易日 last tick 回退，时段未知时保守禁止新开仓。
+6. 保证金不足时回测按配置模拟 margin call 和 stop-out；Demo 实际下单仍经过适配器下单预检，不能将回测简化公式当作券商保证金承诺。
+7. `SESSION_CLOSE` 与 `MARGIN_STOP_OUT` 不算止损。盈利止损默认不增加亏损止损数；心跳同时给出两种止损总数。
+8. Demo entry lockout 连续默认 60 次成功轮询后自动恢复；`--reset-lockout` 提供人工复位。命令复位不能代替排查订单状态。
+9. 持久化状态损坏或无法读取时，不允许在已有本策略持仓状态不明的情况下继续自动交易；必须人工核对 MT5 持仓 ticket、方向、手数、止损与历史成交，再修复/恢复 state 文件。
 
-## 8. 模拟盘/实盘前检查清单
+## 8. 运行前检查清单
 
-- [ ] 确认 CSV 的 OHLC 报价侧、时间戳单位、UTC 声明、符号名称与完整日期覆盖。
-- [ ] 用同一批 MT5 数据验证 M1 聚合 M5/H1 与独立导出数据一致。
-- [ ] 从目标 MT5 Demo 的 XAUUSD 规格导出合约大小、tick size/value、volume min/step/max、账户币种、保证金和交易日历。
-- [ ] 确认 0.05 手符合最小手数和交易步长。
-- [ ] 确认 0.20 美元固定点差及 0.10 美元单边滑点的单位和压力测试区间。
-- [ ] 提供历史 swap 或明确接受第一版只做无 swap 基准加敏感性分析。
-- [ ] 用经纪商交易日历确认墨西哥城周五 21:55 对应的 XAUUSD 是否可交易，以及休市前实际平仓时间。
-- [ ] 验证 Mexico City 夏令时历史处理、重复/跳过本地时间及每 5 分钟/30 分钟事件。
-- [x] 完成未来数据扰动、已收盘 H1、成本拆分、止损计数、暂停周期和周末主动平仓自动化测试。
-- [ ] 用目标 MT5 交易日历复核周末最后可成交时间，并补齐数据缺口/跳空成交路径核验。
-- [ ] 冻结配置后只运行一次 2024 OOS；保存数据哈希、代码版本、日志和指标报告。
-- [ ] 先运行只读信号监控和本地 Paper；任何 Demo 自动执行都需单独明确授权与独立风控评审。
+- [ ] MT5「图表最大柱数」设为不限；导出 M1/M5/H1 并核验 2020-01-01 至 2025-01-01 的首尾覆盖和 `coverage.json`。
+- [ ] 确认目标券商符号名、合约大小、最小/步进/最大手数、tick size/value、账户币种、杠杆、保证金和 stops level。
+- [ ] 确认 Demo 的服务器时钟/UTC 转换、交易时段来源与近 20 个交易日最后 tick 估算；在假期/夏令时/临时维护日人工复核。
+- [ ] 确认点差、滑点、佣金、swap 费率与三倍计息日。配置中的零 swap/佣金只是默认假设。
+- [ ] 用无 MT5 的测试跑完所有共享规则、休市、会话缓冲、风险尺寸、三种 stop scope、跨周期旧仓止损、熔断、保证金和恢复测试。
+- [ ] 检查周末及日内休市没有跨时段持仓；`WEEKEND_CLOSE_UNVERIFIABLE` 应为 0；所有回测主动会话平仓定位在休市前最后可成交 bar。
+- [ ] 对最终 OOS 冻结配置后只运行一次并保存代码版本、配置哈希、数据哈希和完整报告。
+- [ ] Demo 运行时确认状态文件、心跳及 watchdog 告警路径有效；watchdog 只告警，不会自动平仓。
+- [ ] 任何实盘部署或实盘下单须单独授权和另行评审；当前代码未提供实盘模式。
 
 ## 9. 风险与局限性
 
-- M1 OHLC 不能还原一分钟内部 tick 顺序，止损成交需要保守近似；tick 数据能进一步改善，但仍不能复现全部延迟和流动性。
-- 固定点差和固定滑点不代表历史真实交易成本；黄金在波动、换日、开收市时成本可能变化。
-- 佣金 0 不代表无成本；隔夜 swap、融资和账户币种换算仍可能改变结果。
-- `0.05` 手的美元盈亏依赖 XAUUSD 合约大小；不同经纪商/账户可能不同。
-- 总手数不封顶且未模拟保证金、杠杆和强平时，回测不能反映累积暴露导致的保证金压力或强平风险；Demo 结果也不能证明实盘可承受。
-- 周五 21:55 墨西哥城时间可能落在该券商 XAUUSD 已休市时段；必须用目标账户实际交易日历确定最后可成交时刻，不能用停市前陈旧价格填单。
-- 2020–2022 墨西哥城夏令时规则与之后年份不同；必须使用 IANA 时区数据库，固定 UTC offset 会错置历史检查和周末时间。
-- 五小时窗口从指定的本地锚点连续滚动；墨西哥城 09:00 是本次 Demo 新周期锚点，之后严格每 5 小时刷新。
-- 2024 只有一个日历年 OOS，不足以证明跨市场制度和极端行情稳定；结果仅用于工程验证。
-- 回测结果不保证未来表现，也不构成投资建议。
+- M1 OHLC 无法恢复 bar 内 tick 顺序；止损跳空、报价侧、执行滑点都使用近似模型。
+- 回测按固定点差、滑点和配置 swap 计算；成本可能在新闻、换日、开收市时变化。成本翻倍敏感性不是重新撮合。
+- 休市由历史 bar 缺口推断，可能把严重数据中断误判成正常休市；回测应审查 session break 和数据审计，Demo 的 20 日 last tick 只是估算，不是券商承诺日历。
+- 保证金和逐腿强平顺序是简化模型，不涵盖券商净额、动态保证金、负余额保护、滑点扩大或强平执行优先级。
+- 风险仓位使用止损距离的理论预算；跳空和成本会令实际损失超过预算，连续持仓和相关性也会令账户波动高于单笔风险。
+- Demo 进程断电/断网时无法继续更新移动止损；心跳和 watchdog 可报告进程失联，但不会恢复进程或自动管理仓位。
+- 2024 OOS 单年不足以证明跨制度、极端行情或真实成交表现；回测无未来收益保证。
 
-### 规范参考
+### 参考资料
 
-- Python `zoneinfo` 使用 IANA 时区数据库，适合按墨西哥历史民用时间处理夏令时：[Python zoneinfo 文档](https://docs.python.org/3/library/zoneinfo.html)。IANA 2022f 记录墨西哥多数地区在 2022 年后不再实行夏令时：[IANA tzdb 2022f](https://www.iana.org/time-zones/releases/2022f)。
-- MT5 Python 历史 bar 时间按 UTC 解释：[MetaQuotes `copy_rates_range`](https://www.mql5.com/en/docs/python_metatrader5/mt5copyratesrange_py)。
-- MT5 bar 结构包含 OHLC、tick volume、spread 和 real volume：[MetaQuotes `MqlRates`](https://www.mql5.com/en/docs/constants/structures/mqlrates)。
-- 手数、合约大小、tick 规格和 swap 是交易品种属性，需从目标 MT5 账户读取：[MetaQuotes symbol properties](https://www.mql5.com/en/docs/constants/environment_state/marketinfoconstants)。
-- Exness 工具交易时间表按品种、日期、时区、假期和夏令时变化；须在目标账户核对具体 XAUUSD 日历：[Exness instrument trading hours](https://get.exness.help/hc/en-us/articles/4405235684498-Instrument-trading-hours)。
-
-### 运行前数据依赖
-
-1. 导出 MT5 的 Bid OHLC M1/M5/H1 CSV，并确认时间戳来源时区和完整覆盖范围；三周期必须通过聚合一致性审计。
-2. 从目标 MT5 账户提供 XAUUSD 合约大小和账户币种。示例配置的 `contract_size_oz` 留空时，只输出信号/时序结果，不输出美元绩效。
-3. 历史 swap 尚未提供；有合约规格后可以先运行不含 swap 的金额基准和成本敏感性分析，报告明确标注“未计隔夜费”。
-4. 默认周末报价容忍度为截止前 5 分钟。若经纪商在 21:55 前已休市，先从账户交易日历确认其最后可成交时段；超过报价容忍度会标为不可核验，不会伪造成交。
-5. 2020–2024 历史交易日历/正常休市与数据断档尚未导入；出现持仓跨数据缺口时，该次回测自动标记为不可用于绩效审查。
+- MT5 Python 历史 bar UTC 说明：[MetaQuotes `copy_rates_range`](https://www.mql5.com/en/docs/python_metatrader5/mt5copyratesrange_py)。
+- MT5 交易品种属性：[MetaQuotes symbol properties](https://www.mql5.com/en/docs/constants/environment_state/marketinfoconstants)。
+- IANA 时区转换：[Python `zoneinfo`](https://docs.python.org/3/library/zoneinfo.html)。

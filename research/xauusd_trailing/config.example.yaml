@@ -7,11 +7,17 @@ end: "2025-01-01" # exclusive
 symbol: XAUUSD
 initial_equity: 2000
 account_currency: USD
-contract_size_oz: null # Fill from the target MT5 symbol specification before monetary reporting.
-entry_lots: 0.05
+contract_size_oz: null # Required by backtests; Demo reads trade_contract_size from symbol_info.
+entry_lots: 0.05 # Fixed fallback only when risk_per_trade_pct is null.
 max_total_lots: null # No aggregate cap; entries remain limited per five-hour cycle.
+risk_per_trade_pct: 0.005
+max_stop_distance_usd: 8.0
+volume_min_lots: 0.01
+volume_step_lots: 0.01
 max_entries_per_cycle: 10
-pause_after_stops: 10
+max_losing_stops_per_cycle: 10
+stop_rule_scope: current_cycle # current_cycle | next_cycle | both
+count_profitable_stops: false
 cycle_hours: 5
 cycle_anchor_local: "2020-01-01T09:00:00"
 check_minutes: 5
@@ -22,8 +28,22 @@ macd_signal: 9
 spread_usd: 0.20
 slippage_usd_per_side: 0.10
 commission_usd_per_lot_side: 0
-weekend_close_local: "21:55"
-weekend_max_quote_age_minutes: 5
+session_close_buffer_minutes: 15
+no_new_entry_before_close_minutes: 30
+allow_hold_through_session_break: false
+min_stop_distance_usd: 0.0
+max_daily_loss_pct: 0.03
+max_drawdown_pct: 0.10
+leverage: 100
+margin_call_level: 100
+stop_out_level: 50
+swap_long_usd_per_lot_per_night: 0
+swap_short_usd_per_lot_per_night: 0
+triple_swap_weekday: 2 # Monday=0; Wednesday=2.
+require_latest_m1_cross: true
+blackout_windows: [] # UTC HH:MM-HH:MM, start inclusive/end exclusive.
+regime_lookback_days: 20
+regime_trend_threshold_pct: 0.01
 run_walk_forward: true
 data:
   m1_csv: data/mt5/XAUUSD_M1.csv

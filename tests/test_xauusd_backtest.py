@@ -140,7 +140,9 @@ class XauusdEngineTests(unittest.TestCase):
         config = BacktestConfig(
             start="2024-01-08T06:00:00Z",
             end="2024-01-08T06:10:00Z",
-            contract_size_oz=None,
+            contract_size_oz=100,
+            risk_per_trade_pct=None,
+            require_latest_m1_cross=False,
             macd_fast=1,
             macd_slow=2,
             macd_signal=2,
@@ -156,8 +158,7 @@ class XauusdEngineTests(unittest.TestCase):
         entries = result.events[result.events["event_type"] == "ENTRY_FILLED"]
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries.iloc[0]["event_time_utc"], "2024-01-08T06:05:00+00:00")
-        self.assertEqual(result.metrics["status"], "SIGNAL_AND_TIMING_ONLY")
-        self.assertEqual(result.metrics["annualized_return"], None)
+        self.assertEqual(result.metrics["status"], "MONETARY_WITH_CONFIGURED_COSTS")
         self.assertEqual(len(result.open_positions), 1)
 
     def test_no_aggregate_lot_cap_when_positions_remain_open(self) -> None:
@@ -173,7 +174,9 @@ class XauusdEngineTests(unittest.TestCase):
         m5_cross = [(stamp.value, "LONG", f"m5-cap-{stamp.value}") for stamp in check_times]
         config = BacktestConfig(
             start="2024-01-08T06:30:00Z", end="2024-01-08T07:25:00Z",
-            max_entries_per_cycle=20, macd_fast=1, macd_slow=2, macd_signal=2,
+            contract_size_oz=100, risk_per_trade_pct=None,
+            max_entries_per_cycle=20, require_latest_m1_cross=False,
+            macd_fast=1, macd_slow=2, macd_signal=2,
         )
         with patch("research.xauusd_trailing.engine._cross_events", side_effect=[m1_cross, m5_cross]):
             result = run_backtest(m1, m5, h1, config)
@@ -190,7 +193,8 @@ class XauusdEngineTests(unittest.TestCase):
         h1 = pd.concat([h1.iloc[:5], active_h1], ignore_index=True)
         config = BacktestConfig(
             start="2024-01-08T06:00:00Z", end="2024-01-08T06:10:00Z",
-            contract_size_oz=100, macd_fast=1, macd_slow=2, macd_signal=2,
+            contract_size_oz=100, risk_per_trade_pct=None,
+            require_latest_m1_cross=False, macd_fast=1, macd_slow=2, macd_signal=2,
         )
         m1_cross = [(pd.Timestamp("2024-01-08T06:04:00Z").value, "LONG", "m1-stop")]
         m5_cross = [(pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m5-stop")]
@@ -203,12 +207,14 @@ class XauusdEngineTests(unittest.TestCase):
         self.assertAlmostEqual(trade["slippage_cost"], 1.0)
         self.assertAlmostEqual(trade["net_pnl"], -6.0)
         self.assertEqual(result.metrics["stop_loss_count"], 1)
-        self.assertEqual(result.metrics["status"], "MONETARY_EXCLUDING_SWAP")
+        self.assertEqual(result.metrics["status"], "MONETARY_WITH_CONFIGURED_COSTS")
 
     def test_trailing_stop_only_moves_toward_profit(self) -> None:
         m1, m5, h1 = synthetic_frames()
         config = BacktestConfig(
             start="2024-01-08T06:00:00Z", end="2024-01-08T06:35:00Z",
+            contract_size_oz=100, risk_per_trade_pct=None,
+            require_latest_m1_cross=False,
             macd_fast=1, macd_slow=2, macd_signal=2,
         )
         m1_cross = [(pd.Timestamp("2024-01-08T06:04:00Z").value, "LONG", "m1-trail")]
@@ -229,8 +235,10 @@ class XauusdEngineTests(unittest.TestCase):
         h1 = pd.concat([h1.iloc[:5], active_h1], ignore_index=True)
         config = BacktestConfig(
             start="2024-01-08T06:00:00Z", end="2024-01-08T06:40:00Z",
-            contract_size_oz=100, pause_after_stops=1,
+            contract_size_oz=100, risk_per_trade_pct=None,
+            max_losing_stops_per_cycle=1,
             macd_fast=1, macd_slow=2, macd_signal=2,
+            require_latest_m1_cross=False,
         )
         m1_cross = [(pd.Timestamp("2024-01-08T06:04:00Z").value, "LONG", "m1-profitable-stop")]
         m5_cross = [(pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m5-profitable-stop")]
@@ -238,7 +246,9 @@ class XauusdEngineTests(unittest.TestCase):
             result = run_backtest(m1, m5, h1, config)
         self.assertEqual(result.trades.iloc[0]["close_reason"], "STOP_LOSS")
         self.assertGreater(result.trades.iloc[0]["net_pnl"], 0)
-        self.assertTrue(result.events[result.events["event_type"] == "NON_LOSING_STOP_NOT_COUNTED"].shape[0] == 1)
+        stop_counts = result.events[result.events["event_type"] == "STOP_COUNTS"]
+        self.assertEqual(stop_counts.iloc[0]["all_stop_count"], 1)
+        self.assertEqual(stop_counts.iloc[0]["losing_stop_count"], 0)
         self.assertTrue(result.events[result.events["event_type"] == "CYCLE_PAUSED"].empty)
 
     def test_pause_after_threshold_stops_skips_next_local_cycle(self) -> None:
@@ -253,8 +263,11 @@ class XauusdEngineTests(unittest.TestCase):
         m5_cross = [(stamp.value, "LONG", f"m5-{stamp.value}") for stamp in check_times]
         config = BacktestConfig(
             start="2024-01-08T06:00:00Z", end="2024-01-08T12:00:00Z",
-            max_entries_per_cycle=100, pause_after_stops=2,
+            max_entries_per_cycle=100, max_losing_stops_per_cycle=2,
+            stop_rule_scope="next_cycle",
+            risk_per_trade_pct=None,
             contract_size_oz=100, cycle_anchor_local="2024-01-08T00:00:00",
+            require_latest_m1_cross=False,
             macd_fast=1, macd_slow=2, macd_signal=2,
         )
         with patch("research.xauusd_trailing.engine._cross_events", side_effect=[m1_cross, m5_cross]):
@@ -269,62 +282,190 @@ class XauusdEngineTests(unittest.TestCase):
         self.assertTrue(late_entries.empty)
         self.assertGreaterEqual(result.metrics["stop_loss_count"], 2)
 
-    def test_friday_active_close_is_not_a_stop_and_costs_are_recorded(self) -> None:
-        times = pd.date_range("2024-01-06T03:30:00Z", periods=25, freq="min")
-        lows = np.full(len(times), 101.7)
-        lows[15:20] = 101.6
-        m1 = pd.DataFrame(
-            {
-                "timestamp_utc": times, "open": 101.8, "high": 102.0,
-                "low": lows, "close": 101.8,
-            }
-        )
-        m5, _ = reaggregate(m1)
-        warmup_times = pd.date_range("2024-01-05T22:00:00Z", periods=5, freq="h")
-        h1 = pd.DataFrame(
-            {"timestamp_utc": warmup_times, "open": 101.8, "high": 102.0, "low": 99.0, "close": 101.8}
-        )
+    def test_prior_cycle_position_stop_halts_the_cycle_where_it_closes(self) -> None:
+        m1, _, h1 = synthetic_frames()
+        m1.loc[5:, "low"] = 101.2 + np.arange(len(m1) - 5) * 0.001
+        m1.loc[301, "low"] = 100.0
+        m5, active_h1 = reaggregate(m1)
+        h1 = pd.concat([h1.iloc[:5], active_h1], ignore_index=True)
         config = BacktestConfig(
-            start="2024-01-06T03:30:00Z", end="2024-01-06T03:55:00Z",
-            contract_size_oz=100, macd_fast=1, macd_slow=2, macd_signal=2,
-        )
-        m1_cross = [(pd.Timestamp("2024-01-06T03:49:00Z").value, "LONG", "m1-friday")]
-        m5_cross = [(pd.Timestamp("2024-01-06T03:50:00Z").value, "LONG", "m5-friday")]
-        with patch("research.xauusd_trailing.engine._cross_events", side_effect=[m1_cross, m5_cross]):
-            result = run_backtest(m1, m5, h1, config)
-        trade = result.trades.iloc[0]
-        self.assertEqual(trade["close_reason"], "FORCED_WEEKEND_CLOSE")
-        self.assertEqual(result.metrics["stop_loss_count"], 0)
-        self.assertEqual(result.metrics["forced_weekend_close_count"], 1)
-        self.assertAlmostEqual(trade["spread_cost"], 1.0)
-        self.assertAlmostEqual(trade["slippage_cost"], 1.0)
-        timing = result.events[result.events["event_type"] == "WEEKEND_CLOSE_TIMING"]
-        self.assertEqual(timing.iloc[0]["quote_age_minutes"], 0.0)
-
-    def test_stale_friday_quote_is_not_filled(self) -> None:
-        times = pd.date_range("2024-01-06T03:30:00Z", periods=25, freq="min")
-        m1 = pd.DataFrame(
-            {"timestamp_utc": times, "open": 101.8, "high": 102.0, "low": 101.7, "close": 101.8}
-        )
-        m1.loc[15:19, "low"] = 101.6
-        m5, _ = reaggregate(m1)
-        warmup_times = pd.date_range("2024-01-05T22:00:00Z", periods=5, freq="h")
-        h1 = pd.DataFrame(
-            {"timestamp_utc": warmup_times, "open": 101.8, "high": 102.0, "low": 99.0, "close": 101.8}
-        )
-        config = BacktestConfig(
-            start="2024-01-06T03:30:00Z", end="2024-01-06T03:55:00Z",
-            weekend_close_local="22:00", weekend_max_quote_age_minutes=2,
+            start="2024-01-08T06:00:00Z", end="2024-01-08T11:20:00Z",
+            contract_size_oz=100, risk_per_trade_pct=None,
+            max_losing_stops_per_cycle=1, stop_rule_scope="current_cycle",
+            cycle_anchor_local="2024-01-08T00:00:00",
             macd_fast=1, macd_slow=2, macd_signal=2,
         )
-        m1_cross = [(pd.Timestamp("2024-01-06T03:49:00Z").value, "LONG", "m1-stale")]
-        m5_cross = [(pd.Timestamp("2024-01-06T03:50:00Z").value, "LONG", "m5-stale")]
+        m1_cross = [
+            (pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m1-old-cycle"),
+            (pd.Timestamp("2024-01-08T11:05:00Z").value, "LONG", "m1-current-cycle"),
+        ]
+        m5_cross = [
+            (pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m5-old-cycle"),
+            (pd.Timestamp("2024-01-08T11:05:00Z").value, "LONG", "m5-current-cycle"),
+        ]
+        with patch("research.xauusd_trailing.engine._cross_events", side_effect=[m1_cross, m5_cross]):
+            result = run_backtest(m1, m5, h1, config)
+        first_entry = result.events[result.events["event_type"] == "ENTRY_FILLED"].iloc[0]
+        self.assertEqual(first_entry["cycle_id"], "2024-01-08T00:00")
+        stop_count = result.events[result.events["event_type"] == "STOP_COUNTS"].iloc[0]
+        self.assertEqual(stop_count["cycle_id"], "2024-01-08T05:00")
+        blocked = result.events[
+            (result.events["event_type"] == "ENTRY_REJECTED")
+            & (result.events.get("reason") == "CYCLE_STOP_LIMIT")
+        ]
+        self.assertGreaterEqual(len(blocked), 1)
+
+    def test_default_requires_m1_cross_on_latest_closed_minute(self) -> None:
+        m1, m5, h1 = synthetic_frames()
+        config = BacktestConfig(
+            start="2024-01-08T06:00:00Z", end="2024-01-08T06:10:00Z",
+            contract_size_oz=100, risk_per_trade_pct=None,
+            macd_fast=1, macd_slow=2, macd_signal=2,
+        )
+        m1_cross = [(pd.Timestamp("2024-01-08T06:04:00Z").value, "LONG", "m1-too-old")]
+        m5_cross = [(pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m5-latest")]
         with patch("research.xauusd_trailing.engine._cross_events", side_effect=[m1_cross, m5_cross]):
             result = run_backtest(m1, m5, h1, config)
         self.assertTrue(result.trades.empty)
-        self.assertEqual(len(result.open_positions), 1)
-        self.assertEqual(result.audit["valid_for_performance_review"], False)
-        self.assertEqual(len(result.events[result.events["event_type"] == "WEEKEND_CLOSE_UNVERIFIABLE"]), 1)
+
+    def test_minimum_stop_distance_rejects_signal(self) -> None:
+        m1, m5, h1 = synthetic_frames()
+        config = BacktestConfig(
+            start="2024-01-08T06:00:00Z", end="2024-01-08T06:10:00Z",
+            contract_size_oz=100, risk_per_trade_pct=None, min_stop_distance_usd=1.5,
+            macd_fast=1, macd_slow=2, macd_signal=2,
+        )
+        m1_cross = [(pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m1-min-stop")]
+        m5_cross = [(pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m5-min-stop")]
+        with patch("research.xauusd_trailing.engine._cross_events", side_effect=[m1_cross, m5_cross]):
+            result = run_backtest(m1, m5, h1, config)
+        rejects = result.events[result.events["event_type"] == "ENTRY_REJECTED"]
+        self.assertTrue((rejects["reason"] == "MIN_STOP_DISTANCE").any())
+
+    def test_margin_stop_out_is_not_counted_as_a_stop_loss(self) -> None:
+        m1, m5, h1 = synthetic_frames()
+        config = BacktestConfig(
+            start="2024-01-08T06:00:00Z", end="2024-01-08T06:10:00Z",
+            contract_size_oz=100, risk_per_trade_pct=None,
+            margin_call_level=50000, stop_out_level=40000,
+            macd_fast=1, macd_slow=2, macd_signal=2,
+        )
+        m1_cross = [(pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m1-margin")]
+        m5_cross = [(pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m5-margin")]
+        with patch("research.xauusd_trailing.engine._cross_events", side_effect=[m1_cross, m5_cross]):
+            result = run_backtest(m1, m5, h1, config)
+        self.assertEqual(result.trades.iloc[0]["close_reason"], "MARGIN_STOP_OUT")
+        self.assertEqual(result.metrics["margin_stop_out_count"], 1)
+        self.assertEqual(result.metrics["stop_loss_count"], 0)
+
+    def test_daily_loss_trips_close_only_account_halt(self) -> None:
+        m1, _, h1 = synthetic_frames()
+        m1.loc[6, "low"] = 100.0
+        m5, active_h1 = reaggregate(m1)
+        h1 = pd.concat([h1.iloc[:5], active_h1], ignore_index=True)
+        config = BacktestConfig(
+            start="2024-01-08T06:00:00Z", end="2024-01-08T06:20:00Z",
+            contract_size_oz=100, risk_per_trade_pct=None,
+            max_stop_distance_usd=30, max_daily_loss_pct=0.03,
+            slippage_usd_per_side=20,
+            macd_fast=1, macd_slow=2, macd_signal=2,
+        )
+        m1_cross = [(pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m1-halt")]
+        m5_cross = [(pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m5-halt")]
+        with patch("research.xauusd_trailing.engine._cross_events", side_effect=[m1_cross, m5_cross]):
+            result = run_backtest(m1, m5, h1, config)
+        self.assertTrue((result.events["event_type"] == "RISK_HALT").any())
+        self.assertEqual(result.metrics["risk_halt_count"], 1)
+
+    def test_triple_swap_is_charged_at_utc_server_day_rollover(self) -> None:
+        start = pd.Timestamp("2024-01-09T23:40:00Z")
+        times = pd.date_range(start, periods=30, freq="min")
+        lows = 101.2 + np.arange(len(times)) * 0.001
+        lows[:5] = 101.0
+        lows[21] = 100.0  # 2024-01-10 00:01 UTC, after Wednesday rollover.
+        m1 = pd.DataFrame({
+            "timestamp_utc": times, "open": 101.8, "high": 102.0,
+            "low": lows, "close": 101.8,
+        })
+        m5, _ = reaggregate(m1)
+        warmup_times = pd.date_range("2024-01-09T18:00:00Z", periods=5, freq="h")
+        h1 = pd.DataFrame({
+            "timestamp_utc": warmup_times, "open": 101.8, "high": 102.0,
+            "low": 99.0, "close": 101.8,
+        })
+        config = BacktestConfig(
+            start="2024-01-09T23:40:00Z", end="2024-01-10T00:10:00Z",
+            contract_size_oz=100, risk_per_trade_pct=None,
+            swap_long_usd_per_lot_per_night=-2.0, triple_swap_weekday=2,
+            macd_fast=1, macd_slow=2, macd_signal=2,
+        )
+        m1_cross = [(pd.Timestamp("2024-01-09T23:45:00Z").value, "LONG", "m1-swap")]
+        m5_cross = [(pd.Timestamp("2024-01-09T23:45:00Z").value, "LONG", "m5-swap")]
+        with patch("research.xauusd_trailing.engine._cross_events", side_effect=[m1_cross, m5_cross]):
+            result = run_backtest(m1, m5, h1, config)
+        self.assertEqual(result.trades.iloc[0]["close_reason"], "STOP_LOSS")
+        self.assertAlmostEqual(result.trades.iloc[0]["swap"], -0.3)
+        self.assertAlmostEqual(result.metrics["total_swap"], -0.3)
+
+    def test_inferred_session_break_closes_on_last_tradable_bar(self) -> None:
+        first = pd.date_range("2024-01-08T06:00:00Z", periods=60, freq="min")
+        resumed = pd.date_range("2024-01-08T07:30:00Z", periods=60, freq="min")
+        times = first.append(resumed)
+        lows = np.full(len(times), 101.2)
+        lows[:5] = 101.0
+        lows[5:60] = 101.2 + np.arange(55) * 0.001
+        lows[60:] = 101.3
+        m1 = pd.DataFrame({
+            "timestamp_utc": times,
+            "open": 101.8,
+            "high": 102.0,
+            "low": lows,
+            "close": 101.8,
+        })
+        m5, active_h1 = reaggregate(m1)
+        warmup_times = pd.date_range("2024-01-08T01:00:00Z", periods=5, freq="h")
+        warmup = pd.DataFrame({
+            "timestamp_utc": warmup_times, "open": 101.8, "high": 102.0,
+            "low": 99.0, "close": 101.8,
+        })
+        h1 = pd.concat([warmup, active_h1], ignore_index=True).sort_values("timestamp_utc").reset_index(drop=True)
+        config = BacktestConfig(
+            start="2024-01-08T06:00:00Z", end="2024-01-08T08:30:00Z",
+            contract_size_oz=100, risk_per_trade_pct=None, require_latest_m1_cross=False,
+            macd_fast=1, macd_slow=2, macd_signal=2,
+        )
+        m1_cross = [(pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m1-session")]
+        m5_cross = [(pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m5-session")]
+        with patch("research.xauusd_trailing.engine._cross_events", side_effect=[m1_cross, m5_cross]):
+            result = run_backtest(m1, m5, h1, config)
+        self.assertEqual(len(result.trades), 1)
+        trade = result.trades.iloc[0]
+        self.assertEqual(trade["close_reason"], "SESSION_CLOSE")
+        self.assertEqual(trade["exit_time_utc"], "2024-01-08T07:00:00+00:00")
+        close_event = result.events[result.events["event_type"] == "SESSION_CLOSE"].iloc[0]
+        self.assertEqual(close_event["last_executable_bar_utc"], "2024-01-08T06:59:00+00:00")
+        self.assertEqual(result.audit["weekend_close_unverifiable_count"], 0)
+        self.assertFalse((result.events["event_type"] == "WEEKEND_CLOSE_UNVERIFIABLE").any())
+
+    def test_entry_risk_skip_does_not_consume_crosses(self) -> None:
+        m1, _, h1 = synthetic_frames()
+        m1.loc[:4, "low"] = 90.0
+        m5, active_h1 = reaggregate(m1)
+        h1 = pd.concat([h1.iloc[:5], active_h1], ignore_index=True)
+        config = BacktestConfig(
+            start="2024-01-08T06:00:00Z", end="2024-01-08T06:12:00Z",
+            contract_size_oz=100, max_stop_distance_usd=8,
+            macd_fast=1, macd_slow=2, macd_signal=2,
+        )
+        m1_cross = [(pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m1-risk")]
+        m5_cross = [(pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m5-risk")]
+        with patch("research.xauusd_trailing.engine._cross_events", side_effect=[m1_cross, m5_cross]):
+            result = run_backtest(m1, m5, h1, config)
+        skipped = result.events[result.events["event_type"] == "ENTRY_SKIPPED_RISK"]
+        self.assertGreaterEqual(len(skipped), 1)
+        self.assertEqual(skipped.iloc[0]["reason"], "MAX_STOP_DISTANCE_EXCEEDED")
+        self.assertFalse(skipped.iloc[0]["crosses_consumed"])
+        self.assertTrue(result.events[result.events["event_type"] == "ENTRY_FILLED"].empty)
 
 
 if __name__ == "__main__":
