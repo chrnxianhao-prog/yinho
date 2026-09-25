@@ -84,6 +84,7 @@ class TradingService:
                         "instrument_id": instrument["instrument_id"],
                         "raw_symbol": instrument["raw_symbol"],
                         "kind": instrument["kind"],
+                        "price_precision": instrument.get("price_precision", 2),
                         "trade_size": instrument.get("trade_size", 1),
                         "allow_short": bool(instrument.get("allow_short", False)),
                         "data_file": str(path),
@@ -153,25 +154,71 @@ class TradingService:
         version = self.store.set_rule(market_id, spec.raw_symbol, merged)
         return {"version": version, "config": merged}
 
+    def list_strategy_plans(self) -> list[dict[str, Any]]:
+        return self.store.list_strategy_plans()
+
+    def create_strategy_plan(self, payload: dict[str, Any]) -> dict[str, Any]:
+        spec = self.specs.get((payload["market_id"], payload["instrument_id"]))
+        if spec is None:
+            raise KeyError(f"Unknown instrument: {payload['market_id']}/{payload['instrument_id']}")
+        self._validate_strategy_plan(payload)
+        return self.store.create_strategy_plan({**payload, "raw_symbol": spec.raw_symbol})
+
+    def update_strategy_plan(self, plan_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+        current = self.store.get_strategy_plan(plan_id)
+        merged = {**current, **changes}
+        if (merged["market_id"], merged["instrument_id"]) not in self.specs:
+            raise KeyError(f"Unknown instrument: {merged['market_id']}/{merged['instrument_id']}")
+        self._validate_strategy_plan(merged)
+        return self.store.update_strategy_plan(plan_id, changes)
+
+    @staticmethod
+    def _validate_strategy_plan(payload: dict[str, Any]) -> None:
+        if payload["direction"] not in {"LONG", "SHORT", "FLAT"}:
+            raise ValueError("direction must be LONG, SHORT, or FLAT")
+        if payload["execution_mode"] not in {"OBSERVE_ONLY", "AI_SUGGEST", "PAPER_CONFIRM", "MT5_DEMO_CONFIRM"}:
+            raise ValueError("unsupported strategy execution mode")
+        if payload["status"] not in {"DRAFT", "ACTIVE", "PAUSED", "COMPLETED"}:
+            raise ValueError("unsupported strategy plan status")
+        if payload.get("risk_percent") is not None and not 0 <= float(payload["risk_percent"]) <= 5:
+            raise ValueError("risk_percent must be between 0 and 5")
+        for field in ("stop_loss", "take_profit"):
+            if payload.get(field) is not None and float(payload[field]) <= 0:
+                raise ValueError(f"{field} must be greater than zero")
+        if not str(payload.get("title", "")).strip():
+            raise ValueError("strategy plan title is required")
+
     def analysis(self, market_id: str, instrument_id: str, limit: int = 300) -> dict[str, Any]:
         spec = self.specs[(market_id, instrument_id)]
         frame = self._load_frame(market_id, instrument_id)
+        total_bars = len(frame)
         rule_data = self.get_rule(market_id, instrument_id)
+        display_count = max(10, min(limit, 2000))
+        periods = [
+            int(rule_data["config"].get(key, 1))
+            for key in ("slow_ema", "macd_slow", "rsi_period", "atr_period", "volume_period")
+        ]
+        # A chart request only returns the recent visible window. Keep enough
+        # warm-up bars for EMA/RSI/ATR to converge instead of iterating over
+        # every minute in multi-year FX files on every symbol change.
+        analysis_window = max(5000, display_count + max(periods, default=1) * 10)
+        frame = frame.tail(analysis_window).reset_index(drop=True)
         enriched, points = analyze_frame(frame, rule_data["config"], self.registry)
         transitions = signal_transitions(points)
-        signal_ids: dict[tuple[str, str], str] = {}
-        for point in transitions:
-            signal_id = self.store.record_signal(
-                market_id=market_id,
-                instrument_id=instrument_id,
-                raw_symbol=spec.raw_symbol,
-                point=point.to_dict(),
-                rule_version=int(rule_data["version"]),
-            )
-            if signal_id:
-                signal_ids[(point.timestamp, point.level.value)] = signal_id
+        self.store.record_signals(
+            [
+                {
+                    "market_id": market_id,
+                    "instrument_id": instrument_id,
+                    "raw_symbol": spec.raw_symbol,
+                    "point": point.to_dict(),
+                    "rule_version": int(rule_data["version"]),
+                }
+                for point in transitions
+            ],
+        )
 
-        subset = enriched.tail(max(10, min(limit, 2000)))
+        subset = enriched.tail(display_count)
         bars: list[dict[str, Any]] = []
         for _, row in subset.iterrows():
             timestamp = pd.Timestamp(row["timestamp"]).isoformat().replace("+00:00", "Z")
@@ -204,7 +251,7 @@ class TradingService:
             "signals": point_dicts,
             "annotations": self.store.list_annotations(market_id, instrument_id),
             "latest": points[-1].to_dict(),
-            "total_bars": len(enriched),
+            "total_bars": total_bars,
         }
 
     @staticmethod

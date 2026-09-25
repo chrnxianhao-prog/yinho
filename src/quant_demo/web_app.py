@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import importlib.util
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,10 +19,11 @@ from quant_demo.trading_service import TradingService
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB_DIR = Path(__file__).resolve().parent / "web"
-load_dotenv(ROOT / ".env")
+MT5_ENV_PATH = Path(os.getenv("MT5_ENV_PATH", str(ROOT / ".env")))
+load_dotenv(MT5_ENV_PATH)
 
 service = TradingService(ROOT)
-app = FastAPI(title="多市场量化分析与纸面交易终端", version="1.0.0")
+app = FastAPI(title="银禾多市场持仓与交割终端", version="1.1.0")
 
 
 class PaperOrderRequest(BaseModel):
@@ -82,6 +84,36 @@ class RuleRequest(BaseModel):
     confirm: bool = False
 
 
+class StrategyPlanRequest(BaseModel):
+    market_id: str
+    instrument_id: str
+    title: str = Field(min_length=1, max_length=160)
+    direction: str = Field(pattern="^(LONG|SHORT|FLAT)$")
+    timeframe: str = Field(default="1D", min_length=1, max_length=32)
+    entry_condition: str = Field(default="", max_length=4000)
+    exit_condition: str = Field(default="", max_length=4000)
+    stop_loss: float | None = Field(default=None, gt=0)
+    take_profit: float | None = Field(default=None, gt=0)
+    risk_percent: float | None = Field(default=None, ge=0, le=5)
+    execution_mode: str = Field(pattern="^(OBSERVE_ONLY|AI_SUGGEST|PAPER_CONFIRM|MT5_DEMO_CONFIRM)$")
+    status: str = Field(default="DRAFT", pattern="^(DRAFT|ACTIVE|PAUSED|COMPLETED)$")
+    notes: str = Field(default="", max_length=4000)
+
+
+class StrategyPlanUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    direction: str | None = Field(default=None, pattern="^(LONG|SHORT|FLAT)$")
+    timeframe: str | None = Field(default=None, min_length=1, max_length=32)
+    entry_condition: str | None = Field(default=None, max_length=4000)
+    exit_condition: str | None = Field(default=None, max_length=4000)
+    stop_loss: float | None = Field(default=None, gt=0)
+    take_profit: float | None = Field(default=None, gt=0)
+    risk_percent: float | None = Field(default=None, ge=0, le=5)
+    execution_mode: str | None = Field(default=None, pattern="^(OBSERVE_ONLY|AI_SUGGEST|PAPER_CONFIRM|MT5_DEMO_CONFIRM)$")
+    status: str | None = Field(default=None, pattern="^(DRAFT|ACTIVE|PAUSED|COMPLETED)$")
+    notes: str | None = Field(default=None, max_length=4000)
+
+
 class RiskRequest(BaseModel):
     market_id: str
     kill_switch: bool = False
@@ -94,11 +126,6 @@ class Mt5OrderRequest(BaseModel):
     symbol: str = Field(min_length=1, max_length=32)
     side: str = Field(pattern="^(BUY|SELL)$")
     volume: float = Field(gt=0)
-    confirm: bool = False
-
-
-class Mt5CloseRequest(BaseModel):
-    ticket: int = Field(gt=0)
     confirm: bool = False
 
 
@@ -128,7 +155,7 @@ def _http_error(exc: Exception) -> HTTPException:
 
 @contextmanager
 def _mt5_session(*, require_trading: bool = False) -> Iterator[tuple[Mt5DemoAdapter, Any]]:
-    adapter = Mt5DemoAdapter(ROOT / ".env")
+    adapter = Mt5DemoAdapter(MT5_ENV_PATH)
     try:
         account = adapter.connect_demo(require_trading=require_trading)
         yield adapter, account
@@ -177,6 +204,21 @@ def _mt5_account(account: Any) -> dict[str, Any]:
     }
 
 
+def _mt5_readiness() -> dict[str, Any]:
+    terminal_path = os.getenv("MT5_PATH") or os.getenv("MT5_TERMINAL_PATH") or ""
+    required = ("MT5_LOGIN", "MT5_PASSWORD", "MT5_SERVER")
+    return {
+        "env_path": str(MT5_ENV_PATH),
+        "env_file_exists": MT5_ENV_PATH.is_file(),
+        "demo_enabled": os.getenv("MT5_DEMO_ENABLED", "false").lower() == "true",
+        "missing_required": [key for key in required if not os.getenv(key)],
+        "terminal_path_configured": bool(terminal_path),
+        "terminal_path_exists": bool(terminal_path and Path(terminal_path).is_file()),
+        "python_package_available": importlib.util.find_spec("MetaTrader5") is not None,
+        "symbols": [item.strip().upper() for item in os.getenv("WEB_SYMBOLS", "EURUSD,XAUUSD").split(",") if item.strip()],
+    }
+
+
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
     return FileResponse(WEB_DIR / "index.html")
@@ -197,6 +239,7 @@ def config(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         "plugins": service.registry.metadata(),
         "loaded_plugin_modules": service.loaded_plugin_modules,
         "broker_readiness": service.broker_readiness(),
+        "mt5_readiness": _mt5_readiness(),
     }
 
 
@@ -244,6 +287,37 @@ def update_rule(
     _require_confirmation(payload.confirm, "更新指标规则")
     try:
         return service.update_rule(market_id, instrument_id, payload.config)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@app.get("/api/strategy-plans")
+def list_strategy_plans(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    _check_token(authorization)
+    return {"items": service.list_strategy_plans()}
+
+
+@app.post("/api/strategy-plans")
+def create_strategy_plan(
+    payload: StrategyPlanRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _check_token(authorization)
+    try:
+        return {"plan": service.create_strategy_plan(payload.model_dump())}
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@app.patch("/api/strategy-plans/{plan_id}")
+def update_strategy_plan(
+    plan_id: str,
+    payload: StrategyPlanUpdateRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _check_token(authorization)
+    try:
+        return {"plan": service.update_strategy_plan(plan_id, payload.model_dump(exclude_none=True))}
     except Exception as exc:
         raise _http_error(exc) from exc
 
@@ -364,6 +438,12 @@ def mt5_status(
             }
     except Exception as exc:
         raise _http_error(exc) from exc
+
+
+@app.get("/api/mt5/readiness")
+def mt5_readiness(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    _check_token(authorization)
+    return _mt5_readiness()
 
 
 @app.post("/api/mt5/orders")
