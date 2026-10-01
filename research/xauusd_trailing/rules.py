@@ -60,6 +60,11 @@ def size_for_stop(
     return RiskSize(lots, None, distance, budget)
 
 
+def closed_m1_boundary(at: datetime) -> datetime:
+    """按 UTC 最近已收盘 M1 边界判断信号，保留实际报价时间用于执行审计。"""
+    return at.astimezone(UTC).replace(second=0, microsecond=0)
+
+
 def cross_is_eligible(
     cross_at: datetime,
     decision_at: datetime,
@@ -73,7 +78,8 @@ def cross_is_eligible(
     if cross_utc > decision_utc:
         return False
     if require_latest:
-        return cross_utc == decision_utc
+        # 真实 tick 通常带秒/毫秒，最新已收盘 bar 不要求恰好在 tick 时刻收盘。
+        return cross_utc == closed_m1_boundary(decision_utc)
     return (decision_utc - cross_utc).total_seconds() <= lookback_minutes * 60
 
 

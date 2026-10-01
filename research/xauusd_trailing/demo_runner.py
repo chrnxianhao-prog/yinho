@@ -16,6 +16,7 @@ from .cycles import cycle_window, resolve_cycle_anchor
 from .indicators import h1_range_frame, macd_frame
 from .models import BacktestConfig
 from .rules import (
+    closed_m1_boundary,
     cross_is_eligible,
     entry_block_reason,
     is_utc_blackout,
@@ -113,7 +114,8 @@ def evaluate_entry_signal(
 ) -> EntrySignal | None:
     """Evaluate only completed bars and the same cross-age rule as the backtest."""
     consumed = consumed_crosses if consumed_crosses is not None else set()
-    decision = pd.Timestamp(at).tz_convert("UTC")
+    # 数据窗口必须落在整分钟；实际 tick 的秒/毫秒不能让完整窗口少算一根。
+    decision = pd.Timestamp(closed_m1_boundary(at))
     start = decision - pd.Timedelta(minutes=5)
     expected_m1 = pd.date_range(start, periods=5, freq="min", tz="UTC")
     recent_m1 = m1[(m1["timestamp_utc"] >= start) & (m1["timestamp_utc"] < decision)]
@@ -690,7 +692,10 @@ class DemoStrategyRunner:
         )
         if signal is None:
             self.last_entry_check_result = "NO_SIGNAL"
-            self._log("ENTRY_CHECK_NO_SIGNAL", at_utc=at.isoformat())
+            self._log(
+                "ENTRY_CHECK_NO_SIGNAL", at_utc=at.isoformat(),
+                decision_bar_close_utc=closed_m1_boundary(at).isoformat(),
+            )
             return
 
         cycle_id = cycle_id_for(at, self.config.timezone, self.config.cycle_hours, self.cycle_anchor_at)
@@ -909,6 +914,7 @@ class DemoStrategyRunner:
             symbol=self.config.symbol,
             account_currency=str(account.currency),
             margin_mode="HEDGING",
+            signal_time_basis="CLOSED_M1_UTC",
             contract_size_oz=float(info.trade_contract_size),
             volume_min=float(info.volume_min),
             volume_step=float(info.volume_step),

@@ -77,13 +77,17 @@ class DemoRunnerDataTests(unittest.TestCase):
         config = BacktestConfig(contract_size_oz=100)
         m1_event = (decision, "LONG", "M1:test-cross")
         m5_event = (decision, "LONG", "M5:test-cross")
-        with patch("research.xauusd_trailing.demo_runner._crosses", side_effect=[[m1_event], [m5_event]]):
-            signal = evaluate_entry_signal(
-                m1, m5, h1, bid=120.0, ask=120.2, at=decision.to_pydatetime(), config=config,
-            )
-        self.assertIsNotNone(signal)
-        self.assertEqual(signal.side, "LONG")
-        self.assertEqual(signal.stop_loss, 110.0)
+        # 同一已收盘信号在整分钟、带毫秒及几秒后的真实 tick 上结果一致。
+        for delay in (timedelta(0), timedelta(milliseconds=478), timedelta(seconds=4, milliseconds=999)):
+            with self.subTest(delay=delay):
+                with patch("research.xauusd_trailing.demo_runner._crosses", side_effect=[[m1_event], [m5_event]]):
+                    signal = evaluate_entry_signal(
+                        m1, m5, h1, bid=120.0, ask=120.2,
+                        at=decision.to_pydatetime() + delay, config=config,
+                    )
+                self.assertIsNotNone(signal)
+                self.assertEqual(signal.side, "LONG")
+                self.assertEqual(signal.stop_loss, 110.0)
 
         with patch("research.xauusd_trailing.demo_runner._crosses", side_effect=[[m1_event], [m5_event]]):
             consumed = evaluate_entry_signal(
@@ -100,10 +104,13 @@ class DemoRunnerDataTests(unittest.TestCase):
         })
         m5 = pd.DataFrame(columns=["timestamp_utc", "open", "high", "low", "close"])
         h1 = pd.DataFrame(columns=["timestamp_utc", "open", "high", "low", "close"])
-        signal = evaluate_entry_signal(
-            m1, m5, h1, bid=120.0, ask=120.2, at=decision.to_pydatetime(), config=BacktestConfig(),
-        )
-        self.assertIsNone(signal)
+        for delay in (timedelta(0), timedelta(milliseconds=478)):
+            with self.subTest(delay=delay):
+                signal = evaluate_entry_signal(
+                    m1, m5, h1, bid=120.0, ask=120.2,
+                    at=decision.to_pydatetime() + delay, config=BacktestConfig(),
+                )
+                self.assertIsNone(signal)
 
 
 class DemoRunnerHeartbeatTests(unittest.TestCase):

@@ -32,6 +32,7 @@ python -m research.xauusd_trailing.run --config research/xauusd_trailing/config.
 ### 当前策略和风控口径
 
 - 中线基于最近 5 根已收盘 H1：`((五根 high 的平均值) + (五根 low 的平均值)) / 2`。MACD 参数为 12/26/9。每 5 分钟检查；默认 M1 金叉/死叉必须在最近已收盘 M1 bar 发生，M5 同向交叉须落在配置的最近 5 分钟窗口内。信号只在成功开仓后消费。
+- 信号决策时间取实际 tick 时间向下对齐的 UTC 整分钟（最近已收盘 M1 边界）；执行和日志仍保留真实 tick 时间。2026-10-01 修复了 tick 秒/毫秒导致完整 5 根 M1 被误判为缺失、最新交叉比较失败的问题。修复前的 `NO_SIGNAL` 记录不能用于证明实际信号频率；修复后无信号日志同时记录 `decision_bar_close_utc`。
 - 多单要求价格高于中线且 M1/M5 同为金叉；空单要求低于中线且两者同为死叉。多空可同时持有；每周期最多成功开仓 `max_entries_per_cycle` 次，默认 10。默认没有跨周期总手数上限，保证金/熔断仍会阻止或清算超限账户风险。
 - 默认每笔风险预算为当时权益的 0.5%。手数按 `floor((equity × risk_pct) / (止损距离 × 合约盎司数) / volume_step) × volume_step` 向下取整；低于最小手数、止损距离超过 8 美元时记 `ENTRY_SKIPPED_RISK`，交叉不消费。仅 `risk_per_trade_pct: null` 时，才回退至固定 `entry_lots`。
 - 初始止损用上一根已收盘 M5 的低点/高点；每小时 UTC 的 `:00` 和 `:30` 只用上一根完整 M5 更新，且只朝盈利方向收紧。只靠止损出场，不设止盈、不用反向指标。少于 `min_stop_distance_usd` 的信号记 `ENTRY_REJECTED`。

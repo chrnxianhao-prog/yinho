@@ -40,6 +40,14 @@ UTC = timezone.utc
 
 
 class SharedRuleTests(unittest.TestCase):
+    def test_latest_cross_accepts_tick_delay_but_not_old_or_future_bars(self) -> None:
+        close = datetime(2026, 10, 1, 15, 20, tzinfo=UTC)
+        tick = close + timedelta(milliseconds=478)
+        self.assertTrue(cross_is_eligible(close, tick, lookback_minutes=5, require_latest=True))
+        self.assertFalse(cross_is_eligible(close - timedelta(minutes=1), tick, lookback_minutes=5, require_latest=True))
+        self.assertFalse(cross_is_eligible(close + timedelta(minutes=1), tick, lookback_minutes=5, require_latest=True))
+        self.assertFalse(cross_is_eligible(close, close - timedelta(microseconds=1), lookback_minutes=5, require_latest=True))
+
     def test_risk_size_floors_to_volume_step_and_rejects_too_small(self) -> None:
         sized = size_for_stop(
             equity=2000,
