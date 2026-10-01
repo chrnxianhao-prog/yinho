@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 from research.xauusd_trailing.demo_runner import DemoStrategyRunner
@@ -183,22 +184,39 @@ class SessionRuleTests(unittest.TestCase):
         close = next_close_from_weekly_schedule(datetime(2026, 9, 25, 21, 0, tzinfo=UTC), schedule)
         self.assertEqual(close, datetime(2026, 9, 25, 22, 0, tzinfo=UTC))
 
-    def test_recent_twenty_day_last_tick_fallback_and_next_close_estimate(self) -> None:
+    def test_observed_break_uses_last_tick_before_gap_not_calendar_day_end(self) -> None:
         class FakeMT5:
+            TIMEFRAME_M1 = 1
             COPY_TICKS_ALL = 0
 
             @staticmethod
-            def copy_ticks_range(symbol, start, end, mode):
-                if start.weekday() >= 5:
-                    return []
-                close = start.replace(hour=20, minute=57, second=0)
-                return [{"time": int(close.timestamp()), "time_msc": int(close.timestamp() * 1000)}]
+            def copy_rates_range(symbol, timeframe, start, end):
+                day = datetime(2026, 9, 23, tzinfo=UTC)
+                before = pd.date_range(day.replace(hour=20, minute=55), periods=3, freq="min")
+                after = pd.date_range(day.replace(hour=22), periods=120, freq="min")
+                return np.array(
+                    [(int(stamp.timestamp()),) for stamp in (*before, *after)],
+                    dtype=[("time", "i8")],
+                )
 
-        now = datetime(2026, 9, 25, 20, 0, tzinfo=UTC)
-        ticks = recent_daily_last_ticks(FakeMT5(), "XAUUSD", now)
-        self.assertEqual(len(ticks), 20)
+            @staticmethod
+            def copy_ticks_range(symbol, start, end, mode):
+                # 旧实现取 UTC 自然日最后 tick，会选到当晚重开后的 23:59。
+                stamp = (
+                    start.replace(hour=23, minute=59, second=45)
+                    if start.hour == 0 else start + timedelta(seconds=45)
+                )
+                return np.array(
+                    [(int(stamp.timestamp()), int(stamp.timestamp() * 1000))],
+                    dtype=[("time", "i8"), ("time_msc", "i8")],
+                )
+
+        now = datetime(2026, 9, 30, 20, 31, tzinfo=UTC)
+        ticks = recent_daily_last_ticks(FakeMT5(), "XAUUSD", now, lookback_days=10)
+        self.assertEqual(ticks, [datetime(2026, 9, 23, 20, 57, 45, tzinfo=UTC)])
         close = next_close_from_observed_ticks(now, ticks)
-        self.assertEqual(close, datetime(2026, 9, 25, 20, 57, tzinfo=UTC))
+        self.assertEqual(close, datetime(2026, 9, 30, 20, 57, 45, tzinfo=UTC))
+        self.assertTrue(within_entry_buffer(now, close, 30))
 
 
 class DemoStateTests(unittest.TestCase):

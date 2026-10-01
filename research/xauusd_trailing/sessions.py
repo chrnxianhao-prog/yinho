@@ -61,6 +61,14 @@ def _get_field(value: Any, names: tuple[str, ...]) -> Any:
     for name in names:
         if isinstance(value, dict) and name in value:
             return value[name]
+        # MT5 返回的结构化 numpy 行通过键访问字段，而非对象属性。
+        try:
+            indexed = value[name]
+        except (KeyError, IndexError, TypeError, ValueError):
+            pass
+        else:
+            if indexed is not None:
+                return indexed
         candidate = getattr(value, name, None)
         if candidate is not None:
             return candidate
@@ -166,24 +174,59 @@ def _tick_time_utc(tick: Any) -> datetime | None:
 def recent_daily_last_ticks(
     mt5: Any, symbol: str, now_utc: datetime, *, trading_days: int = 20, lookback_days: int = 40
 ) -> list[datetime]:
-    """Read at most the most recent 20 daily closing ticks from the last 40 days."""
+    """读取最近休市缺口前的最后 tick，避免把同日重开后的 tick 当作收盘。"""
+    copy_rates = getattr(mt5, "copy_rates_range", None)
     copy_ticks = getattr(mt5, "copy_ticks_range", None)
-    if not callable(copy_ticks):
+    if not callable(copy_rates) or not callable(copy_ticks) or trading_days <= 0:
         return []
     now = now_utc.astimezone(UTC)
+    try:
+        bars = copy_rates(
+            symbol, int(getattr(mt5, "TIMEFRAME_M1", 1)),
+            now - timedelta(days=lookback_days), now,
+        )
+    except Exception:
+        return []
+    if bars is None or len(bars) < 2:
+        return []
+
+    bar_times: list[datetime] = []
+    for bar in bars:
+        raw = _get_field(bar, ("time",))
+        try:
+            stamp = datetime.fromtimestamp(int(raw), UTC)
+        except (TypeError, ValueError, OSError):
+            continue
+        if stamp <= now:
+            bar_times.append(stamp)
+    bar_times = sorted(set(bar_times))
+
+    # 每个 UTC 交易日取最长的 >30 分钟缺口；同日 22:00 重开后的晚间 tick
+    # 不能覆盖 20:57 前的真实休市边界。周末缺口同样归于周五。
+    breaks_by_day: dict[date, tuple[datetime, timedelta]] = {}
+    for previous, following in zip(bar_times, bar_times[1:]):
+        gap = following - previous
+        if gap <= timedelta(minutes=30):
+            continue
+        day = previous.date()
+        if day not in breaks_by_day or gap > breaks_by_day[day][1]:
+            breaks_by_day[day] = (previous, gap)
+
     mode = int(getattr(mt5, "COPY_TICKS_ALL", 0))
     closes: list[datetime] = []
-    for offset in range(1, lookback_days + 1):
-        day: date = now.date() - timedelta(days=offset)
-        start = datetime.combine(day, time.min, tzinfo=UTC)
-        end = start + timedelta(days=1)
+    for last_bar_start, _ in sorted(breaks_by_day.values(), reverse=True):
+        bar_end = last_bar_start + timedelta(minutes=1)
         try:
-            ticks = copy_ticks(symbol, start, end, mode)
+            ticks = copy_ticks(symbol, last_bar_start, bar_end, mode)
         except Exception:
             continue
         if ticks is None or len(ticks) == 0:
             continue
-        stamps = [stamp for tick in ticks if (stamp := _tick_time_utc(tick)) is not None]
+        stamps = [
+            stamp for tick in ticks
+            if (stamp := _tick_time_utc(tick)) is not None
+            and last_bar_start <= stamp < bar_end
+        ]
         if stamps:
             closes.append(max(stamps))
             if len(closes) >= trading_days:
