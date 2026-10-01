@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -159,6 +161,8 @@ class DemoRunnerHeartbeatTests(unittest.TestCase):
         self.assertEqual(fields["last_entry_check_result"], "NO_SIGNAL")
         self.assertIsNotNone(fields["quote_age_seconds"])
         self.assertEqual(fields["runner_state"], "RUNNING")
+        self.assertEqual(fields["check_minutes"], 1)
+        self.assertTrue(fields["require_latest_m1_cross"])
 
     def test_heartbeat_interval_must_be_positive(self) -> None:
         with self.assertRaisesRegex(ValueError, "heartbeat_seconds must be a finite positive number"):
@@ -179,6 +183,108 @@ class DemoRunnerHeartbeatTests(unittest.TestCase):
             runner._maybe_log_heartbeat()
         self.assertEqual(events[0][1]["runner_state"], "RUNNING_STALE_QUOTE")
 
+
+class DemoRunnerEntryScheduleTests(unittest.TestCase):
+    def make_runner(self, at: datetime, *, check_minutes: int = 1):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        runner = DemoStrategyRunner(
+            SimpleNamespace(), BacktestConfig(check_minutes=check_minutes),
+            stop_new_entries_at=None,
+            cycle_anchor_at=datetime(2026, 10, 1, 9, tzinfo=ZoneInfo("America/Mexico_City")),
+            log_path=Path(directory) / "demo.jsonl", state_path=Path(directory) / "state.json",
+        )
+        events = []
+        runner._log = lambda event, **fields: events.append((event, fields))
+        runner.frames = self.frames_at(at)
+        return runner, events
+
+    @staticmethod
+    def frames_at(at: datetime):
+        decision = pd.Timestamp(at).floor("min")
+        def bars(stamps):
+            return pd.DataFrame({
+                "timestamp_utc": stamps, "open": 119.0, "high": 120.0,
+                "low": 110.0, "close": 119.0,
+            })
+        return {
+            "M1": bars(pd.date_range(decision - pd.Timedelta(minutes=5), periods=5, freq="min")),
+            "M5": bars(pd.date_range(decision.floor("5min") - pd.Timedelta(minutes=5), periods=1, freq="5min")),
+            "H1": bars(pd.date_range(decision.floor("h") - pd.Timedelta(hours=5), periods=5, freq="h")),
+        }
+
+    def test_every_minute_checks_once_even_if_first_tick_is_late(self) -> None:
+        at = datetime(2026, 10, 1, 15, 41, 17, tzinfo=timezone.utc)
+        runner, _ = self.make_runner(at)
+        with patch("research.xauusd_trailing.demo_runner.evaluate_entry_signal", return_value=None) as evaluate:
+            runner._consider_entry(at, 120, 120.2)
+            runner._consider_entry(at + timedelta(seconds=3), 120, 120.2)
+            self.assertEqual(evaluate.call_count, 1)
+            next_tick = at + timedelta(minutes=1)
+            runner.frames = self.frames_at(next_tick)
+            runner._consider_entry(next_tick, 120, 120.2)
+            self.assertEqual(evaluate.call_count, 2)
+        self.assertEqual(runner.last_entry_minute.minute, 42)
+        self.assertFalse(runner.consumed_crosses)
+
+    def test_unready_data_is_refreshed_and_retried_without_duplicate_check(self) -> None:
+        at = datetime(2026, 10, 1, 15, 41, 6, tzinfo=timezone.utc)
+        runner, events = self.make_runner(at)
+        ready = self.frames_at(at)
+        incomplete = {**ready, "M1": ready["M1"].iloc[:-1].copy()}
+        def publish_frames(stamp):
+            runner.frames = incomplete if refresh.call_count == 1 else ready
+        with patch.object(runner, "_refresh_frames", side_effect=publish_frames) as refresh:
+            with patch("research.xauusd_trailing.demo_runner.evaluate_entry_signal", return_value=None) as evaluate:
+                runner._refresh_frames_if_needed(at)
+                runner._consider_entry(at, 120, 120.2)
+                self.assertEqual(runner.last_entry_check_result, "DATA_NOT_READY")
+                self.assertIsNone(runner.last_entry_minute)
+                self.assertEqual(evaluate.call_count, 0)
+                next_tick = at + timedelta(seconds=1)
+                runner._refresh_frames_if_needed(next_tick)
+                runner._consider_entry(next_tick, 120, 120.2)
+                runner._refresh_frames_if_needed(next_tick + timedelta(seconds=1))
+                runner._consider_entry(next_tick + timedelta(seconds=1), 120, 120.2)
+                self.assertEqual(refresh.call_count, 2)
+                self.assertEqual(evaluate.call_count, 1)
+        self.assertEqual([event for event, _ in events], ["ENTRY_CHECK_DATA_NOT_READY", "ENTRY_CHECK_NO_SIGNAL"])
+        self.assertFalse(runner.consumed_crosses)
+
+    def test_next_minute_waits_for_new_bar_instead_of_backfilling_old_signal(self) -> None:
+        at = datetime(2026, 10, 1, 15, 41, 6, tzinfo=timezone.utc)
+        runner, _ = self.make_runner(at)
+        old_ready = runner.frames
+        runner.frames = {**old_ready, "M1": old_ready["M1"].iloc[:-1].copy()}
+        with patch("research.xauusd_trailing.demo_runner.evaluate_entry_signal", return_value=None) as evaluate:
+            runner._consider_entry(at, 120, 120.2)
+            next_tick = at + timedelta(minutes=1)
+            runner.frames = old_ready
+            runner._consider_entry(next_tick, 120, 120.2)
+            self.assertEqual(evaluate.call_count, 0)
+            runner.frames = self.frames_at(next_tick)
+            runner._consider_entry(next_tick + timedelta(seconds=1), 120, 120.2)
+            self.assertEqual(evaluate.call_count, 1)
+            self.assertEqual(evaluate.call_args.kwargs["at"].minute, 42)
+
+    def test_explicit_five_minute_configuration_still_uses_its_schedule(self) -> None:
+        at = datetime(2026, 10, 1, 15, 41, 17, tzinfo=timezone.utc)
+        runner, _ = self.make_runner(at, check_minutes=5)
+        with patch("research.xauusd_trailing.demo_runner.evaluate_entry_signal", return_value=None) as evaluate:
+            runner._consider_entry(at, 120, 120.2)
+            self.assertEqual(evaluate.call_count, 0)
+            tick = at.replace(minute=45)
+            runner.frames = self.frames_at(tick)
+            runner._consider_entry(tick, 120, 120.2)
+            self.assertEqual(evaluate.call_count, 1)
+
+    def test_lockout_still_blocks_evaluation_and_orders(self) -> None:
+        at = datetime(2026, 10, 1, 15, 41, 17, tzinfo=timezone.utc)
+        runner, _ = self.make_runner(at)
+        runner.entry_lockout = True
+        with patch("research.xauusd_trailing.demo_runner.evaluate_entry_signal") as evaluate:
+            runner._consider_entry(at, 120, 120.2)
+            evaluate.assert_not_called()
+        self.assertEqual(runner.last_entry_check_result, "ENTRY_LOCKOUT")
 
 if __name__ == "__main__":
     unittest.main()

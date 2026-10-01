@@ -15,6 +15,7 @@
 | 回测合约规格 | 允许合约大小空值并继续输出信号结果 | 回测必须提供 `contract_size_oz`，否则立即报错；不能遗漏止损计数或美元口径 |
 | 账户保护 | 无账户级熔断、保证金强平及 swap 模型 | 默认日亏损 3%、峰值回撤 10%只平不开；增加简化保证金/强平及可配置隔夜 swap 模型 |
 | MACD 时延 | 允许 M1 使用过去 5 分钟旧交叉 | 默认要求 M1 交叉为最近一根已收盘 M1 的交叉；M5 交叉仍须在最近 5 分钟窗口内 |
+| 入场检查（2026-10-01 用户确认） | 每 5 分钟仅检查最新 M1；Demo 只允许检查分钟 00–05 秒，未齐数据也记无信号 | 每 1 分钟检查最新已收盘 M1；允许当前分钟首个可用 tick，数据未齐单列事件并在本分钟补检，完整检查后同分钟不重复评估 |
 | Demo 恢复 | 锁定无法自动恢复、状态只在内存、已有持仓拒绝启动 | 增加轮询恢复和手动复位、原子持久化及安全接管；状态文件缺失/损坏且已有本策略仓位时仍拒绝启动 |
 
 ## 1. 需求复述与当前参数
@@ -25,7 +26,7 @@
 |---|---:|---|
 | 回测区间 | 2020-01-01 至 2025-01-01（结束不含） | UTC 数据；须验证覆盖 |
 | 初始资金/币种 | 2000 USD | 回测配置 |
-| 区间与信号 | 5 根已收盘 H1；MACD 12/26/9 | 每 5 分钟检查一次 |
+| 区间与信号 | 5 根已收盘 H1；MACD 12/26/9 | 每 1 分钟检查一次；M5 交叉窗口仍为 5 分钟 |
 | 风险仓位 | 0.005；最大止损距离 8.0 USD | 按初始止损报价距离和合约大小计算 |
 | 周期额度 | 每 5 小时 10 次开仓、10 次亏损止损 | `stop_rule_scope=current_cycle`；盈利止损默认不算亏损止损 |
 | 成本 | 点差 0.20 USD；单边滑点 0.10 USD；佣金 0 | 配置模型，不等同历史真实报价 |
@@ -66,14 +67,16 @@ midline    = (avg_high + avg_low) / 2
 MACD 使用收盘价与参数 `(12,26,9)`，M1/M5 独立计算。定义金叉为 MACD 从不高于 signal 转为高于 signal；死叉相反。信号时间是确认交叉的已收盘 bar 时间。
 
 ```text
-每 5 分钟检查一次，使用决策时刻前可用的报价与指标：
+每 1 分钟检查一次，使用决策时刻前可用的报价与指标：
   LONG  当 price > midline，最新 M1 已收盘 bar 有金叉，且 M5 最近 5 分钟有金叉
   SHORT 当 price < midline，最新 M1 已收盘 bar 有死叉，且 M5 最近 5 分钟有死叉
 ```
 
 默认 `require_latest_m1_cross=true`，因此 M1 交叉必须来自最近一根已收盘 M1 bar；此设置优先于 M1 的 5 分钟旧交叉窗口。M5 交叉时间必须在决策时间往前 5 分钟范围内。未来交叉不得用于当前决策。已消费的交叉不会重复使用；因风险手数不足而 `ENTRY_SKIPPED_RISK` 的信号不消费交叉。成功下单/回测成交后才消费对应 M1/M5 cross ID。
 
-2026-10-01 本次补充修复：令真实报价时刻为 `t_tick`，信号决策边界为 `t_decision = floor_UTC_minute(t_tick)`；数据完整性窗口为 `[t_decision-5min, t_decision)` 的 5 根 M1 开始时间，最新 M1 交叉收盘时间必须等于 `t_decision`。回测和 Demo 使用 `rules.closed_m1_boundary` / `cross_is_eligible` 的同一规则。实际报价、成交与事件时间仍使用 `t_tick`，任何 `cross_time > t_tick` 都不合法。旧实现用带秒/毫秒的 tick 时间直接生成整分钟序列并比较最新交叉，导致有效信号被误记为 `NO_SIGNAL`；该缺陷期间的无信号日志不得当作市场无入场机会的证据。本修复不改变每 5 分钟检查、最新 M1 交叉或 M5 五分钟窗口的策略语义。
+2026-10-01 本次补充修复：令真实报价时刻为 `t_tick`，信号决策边界为 `t_decision = floor_UTC_minute(t_tick)`；数据完整性窗口为 `[t_decision-5min, t_decision)` 的 5 根 M1 开始时间，最新 M1 交叉收盘时间必须等于 `t_decision`。回测和 Demo 使用 `rules.closed_m1_boundary` / `cross_is_eligible` 的同一规则。实际报价、成交与事件时间仍使用 `t_tick`，任何 `cross_time > t_tick` 都不合法。旧实现用带秒/毫秒的 tick 时间直接生成整分钟序列并比较最新交叉，导致有效信号被误记为 `NO_SIGNAL`；该缺陷期间的无信号日志不得当作市场无入场机会的证据。此时间精度修复本身不改变交叉有效窗口；检查频率按随后用户确认更新如下。
+
+2026-10-01 用户确认的新调度口径：默认 `check_minutes=1`、`require_latest_m1_cross=true`；每根新收盘 M1 都有一次检查机会，M5 仍回看最近 5 分钟。Demo 不再因 tick 超过分钟的第 5 秒而跳过检查。最近五根完整 M1 缺失、M5 不可用或 H1 区间未预热时记 `ENTRY_CHECK_DATA_NOT_READY`，重新读取数据并在当前分钟补检；数据完整且完成评估后才标记本分钟已检查，不消费未成交交叉。进入下一分钟后判断新的 M1，不补开上一分钟过期交叉。回测和 Demo 共用 `entry_check_due` / `completed_m1_window_is_ready`；日志与心跳同时暴露检查频率和数据等待状态。
 
 入场前按顺序检查：Demo/状态/下单锁定、账户熔断、UTC blackout、休市前禁入、周期亏损止损暂停、周期开仓额度、最小止损距离、止损所在方向、按风险计算手数、保证金/券商预检。拒绝/跳过事件保留数值和原因。
 
@@ -161,7 +164,8 @@ for each M1 event:
     on UTC :00/:30: monotonically tighten stops from previous closed M5
     if this is last M1 before an inferred break:
         close all at this bar; label SESSION_CLOSE; do not count stop
-    at each 5-minute entry check:
+    at each 1-minute entry check (latest completed M1):
+        require complete causal M1 window; Demo retries unavailable data in this minute
         if any shared entry gate blocks: record reason and continue
         require price vs H1 midline and unused same-direction M1/M5 crosses
         validate stop side and broker/configured minimum distance

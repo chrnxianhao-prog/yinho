@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from math import floor
-from typing import MutableMapping, MutableSet
+from typing import Iterable, MutableMapping, MutableSet
 
 
 UTC = timezone.utc
@@ -63,6 +63,19 @@ def size_for_stop(
 def closed_m1_boundary(at: datetime) -> datetime:
     """按 UTC 最近已收盘 M1 边界判断信号，保留实际报价时间用于执行审计。"""
     return at.astimezone(UTC).replace(second=0, microsecond=0)
+
+
+def entry_check_due(at: datetime, check_minutes: int) -> bool:
+    """共用分钟调度规则；报价的秒/毫秒不构成跳过当前分钟的理由。"""
+    return at.minute % check_minutes == 0
+
+
+def completed_m1_window_is_ready(bar_open_times: Iterable[datetime], at: datetime) -> bool:
+    """最近五分钟必须恰好有五根完整 M1，不接受缺口、重复或未来 bar。"""
+    boundary = closed_m1_boundary(at)
+    expected = [boundary - timedelta(minutes=offset) for offset in range(5, 0, -1)]
+    actual = [stamp.astimezone(UTC) for stamp in bar_open_times]
+    return actual == expected
 
 
 def cross_is_eligible(

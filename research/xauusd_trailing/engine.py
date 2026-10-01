@@ -14,8 +14,10 @@ from .indicators import h1_range_frame, macd_frame
 from .metrics import calculate_metrics
 from .models import BacktestConfig
 from .rules import (
+    completed_m1_window_is_ready,
     cross_is_eligible,
     entry_block_reason,
+    entry_check_due,
     is_utc_blackout,
     margin_level_pct,
     margin_required,
@@ -537,10 +539,13 @@ def run_backtest(m1: pd.DataFrame, m5: pd.DataFrame, h1: pd.DataFrame, config: B
         next_break_start = next_break.break_start_utc if next_break else None
         next_session_close = next_break.last_executable_close_utc if next_break else None
 
-        if local_minute % config.check_minutes == 0 and local.second == 0:
+        if entry_check_due(local, config.check_minutes):
             signal_checks += 1
+            recent_left = int(np.searchsorted(m1_ns, bar_ns - pd.Timedelta(minutes=5).value, side="left"))
+            recent_m1 = (pd.Timestamp(stamp, tz="UTC").to_pydatetime() for stamp in m1_ns[recent_left:index])
+            m1_ready = completed_m1_window_is_ready(recent_m1, bar_time.to_pydatetime())
             h1_index = int(np.searchsorted(h1_close_ns, bar_ns, side="right") - 1)
-            if h1_index >= 0 and np.isfinite(h1_midline[h1_index]):
+            if m1_ready and h1_index >= 0 and np.isfinite(h1_midline[h1_index]):
                 midline = float(h1_midline[h1_index])
                 direction = "LONG" if bid_open > midline else "SHORT" if bid_open < midline else None
                 if direction:

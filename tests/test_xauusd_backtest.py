@@ -135,6 +135,24 @@ class XauusdDataTests(unittest.TestCase):
 
 
 class XauusdEngineTests(unittest.TestCase):
+    def test_minute_check_catches_latest_m1_between_old_check_boundaries(self) -> None:
+        m1, m5, h1 = synthetic_frames()
+        m1_cross = [(pd.Timestamp("2024-01-08T06:06:00Z").value, "LONG", "m1-minute-six")]
+        m5_cross = [(pd.Timestamp("2024-01-08T06:05:00Z").value, "LONG", "m5-minute-five")]
+        for check_minutes, expected_entries in ((1, 1), (5, 0)):
+            with self.subTest(check_minutes=check_minutes):
+                config = BacktestConfig(
+                    start="2024-01-08T06:00:00Z", end="2024-01-08T06:10:00Z",
+                    contract_size_oz=100, risk_per_trade_pct=None,
+                    check_minutes=check_minutes, require_latest_m1_cross=True,
+                )
+                with patch("research.xauusd_trailing.engine._cross_events", side_effect=[m1_cross, m5_cross]):
+                    result = run_backtest(m1, m5, h1, config)
+                entries = result.events[result.events["event_type"] == "ENTRY_FILLED"] if not result.events.empty else result.events
+                self.assertEqual(len(entries), expected_entries)
+                if expected_entries:
+                    self.assertEqual(entries.iloc[0]["event_time_utc"], "2024-01-08T06:06:00+00:00")
+
     def test_entry_uses_closed_crosses_once_and_emits_no_live_order(self) -> None:
         m1, m5, h1 = synthetic_frames()
         config = BacktestConfig(

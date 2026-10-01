@@ -31,8 +31,9 @@ python -m research.xauusd_trailing.run --config research/xauusd_trailing/config.
 
 ### 当前策略和风控口径
 
-- 中线基于最近 5 根已收盘 H1：`((五根 high 的平均值) + (五根 low 的平均值)) / 2`。MACD 参数为 12/26/9。每 5 分钟检查；默认 M1 金叉/死叉必须在最近已收盘 M1 bar 发生，M5 同向交叉须落在配置的最近 5 分钟窗口内。信号只在成功开仓后消费。
+- 中线基于最近 5 根已收盘 H1：`((五根 high 的平均值) + (五根 low 的平均值)) / 2`。MACD 参数为 12/26/9。每 1 分钟检查；默认 M1 金叉/死叉必须在最近已收盘 M1 bar 发生，M5 同向交叉须落在配置的最近 5 分钟窗口内。信号只在成功开仓后消费。
 - 信号决策时间取实际 tick 时间向下对齐的 UTC 整分钟（最近已收盘 M1 边界）；执行和日志仍保留真实 tick 时间。2026-10-01 修复了 tick 秒/毫秒导致完整 5 根 M1 被误判为缺失、最新交叉比较失败的问题。修复前的 `NO_SIGNAL` 记录不能用于证明实际信号频率；修复后无信号日志同时记录 `decision_bar_close_utc`。
+- 2026-10-01 按用户确认把默认 `check_minutes` 从 5 改为 1，保留 `require_latest_m1_cross=true`，避免跳过检查边界之间的 M1 交叉。Demo 在当前分钟首个可用 tick 上检查，不再要求 tick 必须落在 00–05 秒；完整检查完成后同一分钟不再重复评估。数据未齐则记 `ENTRY_CHECK_DATA_NOT_READY` 并在当前分钟重新读取/补检，不消费交叉；跨入下一分钟后只判断新的最近已收盘 M1，不追开过期信号。回测使用相同分钟调度和完整 M1 窗口规则。
 - 多单要求价格高于中线且 M1/M5 同为金叉；空单要求低于中线且两者同为死叉。多空可同时持有；每周期最多成功开仓 `max_entries_per_cycle` 次，默认 10。默认没有跨周期总手数上限，保证金/熔断仍会阻止或清算超限账户风险。
 - 默认每笔风险预算为当时权益的 0.5%。手数按 `floor((equity × risk_pct) / (止损距离 × 合约盎司数) / volume_step) × volume_step` 向下取整；低于最小手数、止损距离超过 8 美元时记 `ENTRY_SKIPPED_RISK`，交叉不消费。仅 `risk_per_trade_pct: null` 时，才回退至固定 `entry_lots`。
 - 初始止损用上一根已收盘 M5 的低点/高点；每小时 UTC 的 `:00` 和 `:30` 只用上一根完整 M5 更新，且只朝盈利方向收紧。只靠止损出场，不设止盈、不用反向指标。少于 `min_stop_distance_usd` 的信号记 `ENTRY_REJECTED`。
@@ -51,7 +52,7 @@ python scripts/run_xauusd_demo_strategy.py --confirm-demo-strategy
 
 运行器仍执行 Demo-only、对冲账户、订单前预检、止损只收紧不放松、订单结果不确定时锁定等既有保护。持仓/周期状态原子写入 `artifacts/xauusd_demo/state.json`；可通过 `--state-file` 改路径。启动时能读取状态则接管已有本策略仓位；已有策略仓位但状态无法读取时会拒绝启动并要求先人工核对 MT5 持仓/服务器止损及状态文件。连续成功轮询达到 `--lockout-recovery-polls`（默认 60）后自动解除入场锁定；可在确认账户/状态无异常后使用 `--reset-lockout`。
 
-默认每 60 秒记录心跳，含当日已实现+浮动盈亏、当前回撤、熔断、入场锁定、周期亏损/全部止损计数、下一休市时间与其数据来源。独立看门狗只检查 JSONL 心跳是否过期，输出日志及退出码，不会平仓或重启：
+默认每 60 秒记录心跳，含实际 `check_minutes`、`require_latest_m1_cross`、数据等待原因、当日已实现+浮动盈亏、当前回撤、熔断、入场锁定、周期亏损/全部止损计数、下一休市时间与其数据来源。独立看门狗只检查 JSONL 心跳是否过期，输出日志及退出码，不会平仓或重启：
 
 ```powershell
 python scripts/xauusd_watchdog.py --log artifacts/xauusd_demo/xauusd_demo_<时间戳>.jsonl --max-age-seconds 180

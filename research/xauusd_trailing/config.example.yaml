@@ -20,7 +20,7 @@ stop_rule_scope: current_cycle # current_cycle | next_cycle | both
 count_profitable_stops: false
 cycle_hours: 5
 cycle_anchor_local: "2020-01-01T09:00:00"
-check_minutes: 5
+check_minutes: 1 # 每分钟检查最新已收盘 M1；M5 交叉仍回看 5 分钟。
 range_bars: 5
 macd_fast: 12
 macd_slow: 26

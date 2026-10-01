@@ -17,8 +17,10 @@ from .indicators import h1_range_frame, macd_frame
 from .models import BacktestConfig
 from .rules import (
     closed_m1_boundary,
+    completed_m1_window_is_ready,
     cross_is_eligible,
     entry_block_reason,
+    entry_check_due,
     is_utc_blackout,
     record_stop_exit,
     risk_halt_reason,
@@ -101,6 +103,23 @@ def _crosses(frame: pd.DataFrame, timeframe: str, minutes: int, config: Backtest
     return output
 
 
+def entry_data_ready_reason(
+    m1: pd.DataFrame, m5: pd.DataFrame, h1: pd.DataFrame,
+    *, at: datetime, config: BacktestConfig,
+) -> str | None:
+    """未就绪的数据单独报告并允许补检，不能当作已完成的无信号检查。"""
+    decision = pd.Timestamp(closed_m1_boundary(at))
+    start = decision - pd.Timedelta(minutes=5)
+    recent = m1[(m1["timestamp_utc"] >= start) & (m1["timestamp_utc"] < decision)]
+    if not completed_m1_window_is_ready(recent["timestamp_utc"].tolist(), at):
+        return "M1_WINDOW_INCOMPLETE"
+    if m5.empty:
+        return "M5_DATA_UNAVAILABLE"
+    if len(h1) < config.range_bars:
+        return "H1_RANGE_NOT_READY"
+    return None
+
+
 def evaluate_entry_signal(
     m1: pd.DataFrame,
     m5: pd.DataFrame,
@@ -117,13 +136,7 @@ def evaluate_entry_signal(
     # 数据窗口必须落在整分钟；实际 tick 的秒/毫秒不能让完整窗口少算一根。
     decision = pd.Timestamp(closed_m1_boundary(at))
     start = decision - pd.Timedelta(minutes=5)
-    expected_m1 = pd.date_range(start, periods=5, freq="min", tz="UTC")
-    recent_m1 = m1[(m1["timestamp_utc"] >= start) & (m1["timestamp_utc"] < decision)]
-    if len(recent_m1) != 5 or not recent_m1["timestamp_utc"].reset_index(drop=True).equals(
-        pd.Series(expected_m1, name="timestamp_utc")
-    ):
-        return None
-    if len(h1) < config.range_bars or m5.empty:
+    if entry_data_ready_reason(m1, m5, h1, at=at, config=config) is not None:
         return None
 
     ranges = h1_range_frame(h1, config.range_bars)
@@ -218,6 +231,8 @@ class DemoStrategyRunner:
         self.last_history_scan = self.started_at - timedelta(days=30)
         self.last_data_minute: datetime | None = None
         self.last_entry_minute: datetime | None = None
+        self._entry_data_wait_minute: datetime | None = None
+        self._entry_data_wait_reason: str | None = None
         self.last_entry_check_at: datetime | None = None
         self.last_entry_check_result = "NOT_CHECKED"
         self.last_quote_time_utc: datetime | None = None
@@ -412,6 +427,9 @@ class DemoStrategyRunner:
             last_quote_time_utc=self.last_quote_time_utc.isoformat() if self.last_quote_time_utc else None,
             last_entry_check_time_utc=self.last_entry_check_at.isoformat() if self.last_entry_check_at else None,
             last_entry_check_result=self.last_entry_check_result,
+            check_minutes=self.config.check_minutes,
+            require_latest_m1_cross=self.config.require_latest_m1_cross,
+            entry_data_wait_reason=self._entry_data_wait_reason,
             strategy_open_positions=position_count,
             position_query_error_type=position_query_error,
             cycle_id=cycle_id,
@@ -449,6 +467,13 @@ class DemoStrategyRunner:
         if any(frames[name].empty for name in ("M1", "M5", "H1")):
             raise RuntimeError("recent closed M1/M5/H1 bars are unavailable")
         self.frames = frames
+
+    def _refresh_frames_if_needed(self, at: datetime) -> None:
+        minute = closed_m1_boundary(at)
+        if minute != self.last_data_minute or minute == self._entry_data_wait_minute:
+            # 当前分钟数据未齐时重新读取；齐备并完成检查后不重复刷新/评估。
+            self._refresh_frames(at)
+            self.last_data_minute = minute
 
     def _scan_stop_deals(self, now: datetime) -> None:
         if (now - self.last_history_scan).total_seconds() < 3:
@@ -672,20 +697,39 @@ class DemoStrategyRunner:
     def _consider_entry(self, at: datetime, bid: float, ask: float) -> None:
         local = at.astimezone(self.tz)
         key = local.replace(second=0, microsecond=0)
-        if local.minute % self.config.check_minutes or local.second > 5 or key == self.last_entry_minute:
+        if not entry_check_due(local, self.config.check_minutes) or key == self.last_entry_minute:
             return
-        self.last_entry_minute = key
         self.last_entry_check_at = at.astimezone(UTC)
         self.last_entry_check_result = "CHECKING"
         if (self.stop_new_entries_at is not None and (datetime.now(UTC) >= self.stop_new_entries_at or at >= self.stop_new_entries_at)):
+            self.last_entry_minute = key
             self.last_entry_check_result = "ENTRY_CUTOFF"
             return
         if self.lockout_state_error:
+            self.last_entry_minute = key
             self.last_entry_check_result = "STATE_UNREADABLE"
             return
         if self.entry_lockout:
+            self.last_entry_minute = key
             self.last_entry_check_result = "ENTRY_LOCKOUT"
             return
+        not_ready = entry_data_ready_reason(
+            self.frames["M1"], self.frames["M5"], self.frames["H1"], at=at, config=self.config,
+        )
+        if not_ready:
+            self.last_entry_check_result = "DATA_NOT_READY"
+            if self._entry_data_wait_minute != key or self._entry_data_wait_reason != not_ready:
+                self._log(
+                    "ENTRY_CHECK_DATA_NOT_READY", reason=not_ready, at_utc=at.isoformat(),
+                    decision_bar_close_utc=closed_m1_boundary(at).isoformat(),
+                    retry_current_minute=True,
+                )
+            self._entry_data_wait_minute = key
+            self._entry_data_wait_reason = not_ready
+            return
+        self.last_entry_minute = key
+        self._entry_data_wait_minute = None
+        self._entry_data_wait_reason = None
         signal = evaluate_entry_signal(
             self.frames["M1"], self.frames["M5"], self.frames["H1"],
             bid=bid, ask=ask, at=at, config=self.config, consumed_crosses=self.consumed_crosses,
@@ -915,6 +959,8 @@ class DemoStrategyRunner:
             account_currency=str(account.currency),
             margin_mode="HEDGING",
             signal_time_basis="CLOSED_M1_UTC",
+            check_minutes=self.config.check_minutes,
+            require_latest_m1_cross=self.config.require_latest_m1_cross,
             contract_size_oz=float(info.trade_contract_size),
             volume_min=float(info.volume_min),
             volume_step=float(info.volume_step),
@@ -955,10 +1001,7 @@ class DemoStrategyRunner:
                         time.sleep(self.poll_seconds)
                         continue
                     self._stale_logged = False
-                    minute_key = tick_at.replace(second=0, microsecond=0)
-                    if minute_key != self.last_data_minute:
-                        self._refresh_frames(tick_at)
-                        self.last_data_minute = minute_key
+                    self._refresh_frames_if_needed(tick_at)
                     self._scan_stop_deals(now)
                     self._update_account_risk(now)
                     self._refresh_next_session_close(tick_at, info)

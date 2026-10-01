@@ -28,7 +28,7 @@ class BacktestConfig:
     count_profitable_stops: bool = False
     cycle_hours: int = 5
     cycle_anchor_local: str = "2020-01-01T09:00:00"
-    check_minutes: int = 5
+    check_minutes: int = 1
     range_bars: int = 5
     macd_fast: int = 12
     macd_slow: int = 26

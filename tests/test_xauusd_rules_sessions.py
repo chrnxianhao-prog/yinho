@@ -16,8 +16,10 @@ from research.xauusd_trailing.demo_runner import DemoStrategyRunner
 from research.xauusd_trailing.engine import run_backtest
 from research.xauusd_trailing.models import BacktestConfig
 from research.xauusd_trailing.rules import (
+    completed_m1_window_is_ready,
     cross_is_eligible,
     entry_block_reason,
+    entry_check_due,
     is_utc_blackout,
     record_stop_exit,
     risk_halt_reason,
@@ -40,6 +42,21 @@ UTC = timezone.utc
 
 
 class SharedRuleTests(unittest.TestCase):
+    def test_shared_schedule_accepts_late_ticks_in_each_minute(self) -> None:
+        tick = datetime(2026, 10, 1, 15, 41, 17, tzinfo=UTC)
+        self.assertTrue(entry_check_due(tick, 1))
+        self.assertFalse(entry_check_due(tick, 5))
+        self.assertTrue(entry_check_due(tick.replace(minute=45), 5))
+
+    def test_shared_m1_window_requires_complete_causal_bars(self) -> None:
+        tick = datetime(2026, 10, 1, 15, 41, 17, tzinfo=UTC)
+        boundary = tick.replace(second=0)
+        ready = [boundary - timedelta(minutes=offset) for offset in range(5, 0, -1)]
+        self.assertTrue(completed_m1_window_is_ready(ready, tick))
+        self.assertFalse(completed_m1_window_is_ready(ready[:-1], tick))
+        self.assertFalse(completed_m1_window_is_ready(ready + [ready[-1]], tick))
+        self.assertFalse(completed_m1_window_is_ready(ready[:-1] + [boundary], tick))
+
     def test_latest_cross_accepts_tick_delay_but_not_old_or_future_bars(self) -> None:
         close = datetime(2026, 10, 1, 15, 20, tzinfo=UTC)
         tick = close + timedelta(milliseconds=478)

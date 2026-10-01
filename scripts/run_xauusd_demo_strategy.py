@@ -69,7 +69,7 @@ def main() -> None:
         "--heartbeat-seconds",
         type=float,
         default=60.0,
-        help="Interval between liveness records; does not change the 5-minute signal checks",
+        help="Interval between liveness records; does not change configured entry check frequency",
     )
     parser.add_argument(
         "--confirm-demo-strategy", action="store_true",
