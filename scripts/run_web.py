@@ -19,7 +19,9 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=int(os.getenv("WEB_PORT", "8787")))
     parser.add_argument("--open-browser", action="store_true", help="Open the terminal in the default browser")
     args = parser.parse_args()
-    load_dotenv(ROOT / ".env")
+    env_path = Path(os.getenv("MT5_ENV_PATH", str(ROOT / ".env")))
+    load_dotenv(env_path)
+    os.environ.setdefault("MT5_ENV_PATH", str(env_path))
 
     local_hosts = {"127.0.0.1", "localhost", "::1"}
     if args.host not in local_hosts and not os.getenv("WEB_API_TOKEN"):

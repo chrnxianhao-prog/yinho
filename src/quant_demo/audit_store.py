@@ -27,7 +27,6 @@ class AuditStore:
         connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
         return connection
 
     @contextmanager
@@ -167,6 +166,25 @@ class AuditStore:
             request_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS strategy_plans (
+            plan_id TEXT PRIMARY KEY,
+            market_id TEXT NOT NULL,
+            instrument_id TEXT NOT NULL,
+            raw_symbol TEXT NOT NULL,
+            title TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            entry_condition TEXT NOT NULL,
+            exit_condition TEXT NOT NULL,
+            stop_loss REAL,
+            take_profit REAL,
+            risk_percent REAL,
+            execution_mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            notes TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS audit_events (
             audit_id TEXT PRIMARY KEY,
             category TEXT NOT NULL,
@@ -184,6 +202,7 @@ class AuditStore:
         );
         """
         with self._lock, self.connection() as connection:
+            connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(schema)
             order_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(orders)").fetchall()
@@ -287,6 +306,61 @@ class AuditStore:
             return None
         return int(rows[0]["version"]), json.loads(rows[0]["config_json"])
 
+    def list_strategy_plans(self) -> list[dict[str, Any]]:
+        return self.query(
+            "SELECT * FROM strategy_plans ORDER BY updated_at DESC, created_at DESC",
+        )
+
+    def get_strategy_plan(self, plan_id: str) -> dict[str, Any]:
+        rows = self.query("SELECT * FROM strategy_plans WHERE plan_id=?", (plan_id,))
+        if not rows:
+            raise KeyError(plan_id)
+        return rows[0]
+
+    def create_strategy_plan(self, payload: dict[str, Any]) -> dict[str, Any]:
+        plan_id = str(uuid.uuid4())
+        now = utc_now()
+        self.execute(
+            """
+            INSERT INTO strategy_plans (
+                plan_id, market_id, instrument_id, raw_symbol, title, direction,
+                timeframe, entry_condition, exit_condition, stop_loss, take_profit,
+                risk_percent, execution_mode, status, notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                plan_id, payload["market_id"], payload["instrument_id"], payload["raw_symbol"],
+                payload["title"], payload["direction"], payload["timeframe"],
+                payload["entry_condition"], payload["exit_condition"], payload.get("stop_loss"),
+                payload.get("take_profit"), payload.get("risk_percent"), payload["execution_mode"],
+                payload["status"], payload.get("notes", ""), now, now,
+            ),
+        )
+        result = self.get_strategy_plan(plan_id)
+        self.audit("STRATEGY_PLAN", "CREATED", result, payload["market_id"])
+        return result
+
+    def update_strategy_plan(self, plan_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+        current = self.get_strategy_plan(plan_id)
+        merged = {**current, **changes}
+        now = utc_now()
+        self.execute(
+            """
+            UPDATE strategy_plans SET title=?, direction=?, timeframe=?, entry_condition=?,
+              exit_condition=?, stop_loss=?, take_profit=?, risk_percent=?, execution_mode=?,
+              status=?, notes=?, updated_at=? WHERE plan_id=?
+            """,
+            (
+                merged["title"], merged["direction"], merged["timeframe"],
+                merged["entry_condition"], merged["exit_condition"], merged.get("stop_loss"),
+                merged.get("take_profit"), merged.get("risk_percent"), merged["execution_mode"],
+                merged["status"], merged.get("notes", ""), now, plan_id,
+            ),
+        )
+        result = self.get_strategy_plan(plan_id)
+        self.audit("STRATEGY_PLAN", "UPDATED", result, str(result["market_id"]))
+        return result
+
     def record_signal(
         self,
         *,
@@ -321,6 +395,26 @@ class AuditStore:
         except sqlite3.IntegrityError:
             return None
         return signal_id
+
+    def record_signals(self, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        values = [
+            (
+                str(uuid.uuid4()), row["market_id"], row["instrument_id"], row["raw_symbol"],
+                row["point"]["timestamp"], row["point"]["price"], row["point"]["level"],
+                row["point"]["entry_score"], row["point"]["exit_score"],
+                json.dumps(row["point"]["reasons"], ensure_ascii=False),
+                json.dumps(row["point"]["indicators"], ensure_ascii=False),
+                row["rule_version"], utc_now(),
+            )
+            for row in rows
+        ]
+        with self._lock, self.connection() as connection:
+            connection.executemany(
+                "INSERT OR IGNORE INTO signal_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
 
     def create_annotation(self, payload: dict[str, Any]) -> dict[str, Any]:
         annotation_id = str(uuid.uuid4())

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -29,6 +30,16 @@ class DemoOrderResult:
     price: float
     retcode: int
     comment: str
+
+
+class DemoOrderError(RuntimeError):
+    """An order failure with an explicit indication whether submission may have reached MT5."""
+
+    order_was_sent = False
+
+
+class DemoOrderUncertainError(DemoOrderError):
+    order_was_sent = True
 
 
 class Mt5DemoAdapter:
@@ -226,17 +237,17 @@ class Mt5DemoAdapter:
     def _send(self, request: dict[str, Any]) -> DemoOrderResult:
         check = self.mt5.order_check(request)
         if check is None:
-            raise RuntimeError(f"order_check failed: {self.mt5.last_error()}")
+            raise DemoOrderError(f"order_check failed: {self.mt5.last_error()}")
         result = self.mt5.order_send(request)
         if result is None:
-            raise RuntimeError(f"order_send failed: {self.mt5.last_error()}")
+            raise DemoOrderUncertainError(f"order_send returned no result: {self.mt5.last_error()}")
         ok_codes = {
             int(self.mt5.TRADE_RETCODE_DONE),
             int(self.mt5.TRADE_RETCODE_PLACED),
             int(self.mt5.TRADE_RETCODE_DONE_PARTIAL),
         }
         if int(result.retcode) not in ok_codes:
-            raise RuntimeError(
+            raise DemoOrderError(
                 f"MT5 order rejected: retcode={result.retcode} comment={result.comment} result={result}",
             )
         return DemoOrderResult(
@@ -328,3 +339,99 @@ class Mt5DemoAdapter:
         if not positions:
             raise RuntimeError(f"Position ticket {ticket} was not found")
         return self.close_position(positions[0], allow_external=allow_external)
+
+    def ensure_demo_account(self, *, require_trading: bool = True) -> Any:
+        """Re-check the connected account before every strategy-side mutation."""
+        account = self.mt5.account_info()
+        if account is None:
+            raise RuntimeError(f"MT5 account unavailable: {self.mt5.last_error()}")
+        demo_mode = int(getattr(self.mt5, "ACCOUNT_TRADE_MODE_DEMO", 0))
+        if int(account.trade_mode) != demo_mode:
+            raise RuntimeError("Refusing strategy operation: connected account is not Demo.")
+        if require_trading and not bool(account.trade_allowed):
+            raise RuntimeError("MT5 Demo account does not currently allow trading.")
+        return account
+
+    def _price_to_tick(self, symbol_info: Any, price: float, *, round_up: bool) -> float:
+        tick_size = float(getattr(symbol_info, "trade_tick_size", 0.0) or symbol_info.point)
+        if tick_size <= 0:
+            raise RuntimeError("MT5 symbol has an invalid tick size.")
+        units = price / tick_size
+        snapped = (math.ceil(units - 1e-10) if round_up else math.floor(units + 1e-10)) * tick_size
+        return round(snapped, int(symbol_info.digits))
+
+    def open_strategy_market(
+        self, symbol: str, side: str, volume: float, stop_loss: float, *,
+        strategy_id: str = "xauusd-v1",
+    ) -> DemoOrderResult:
+        """Open one explicitly tagged Demo strategy position with a server-side SL."""
+        try:
+            account = self.ensure_demo_account(require_trading=True)
+            hedge_mode = int(getattr(self.mt5, "ACCOUNT_MARGIN_MODE_RETAIL_HEDGING", 2))
+            if int(account.margin_mode) != hedge_mode:
+                raise RuntimeError("Strategy requires a hedging-mode Demo account for independent long/short legs.")
+            info, tick, normalized = self._check_symbol(symbol, volume)
+            side_upper = side.upper()
+            if side_upper not in {"BUY", "SELL"}:
+                raise ValueError("side must be BUY or SELL")
+            is_buy = side_upper == "BUY"
+            stop = self._price_to_tick(info, float(stop_loss), round_up=not is_buy)
+            min_distance = max(0.0, float(getattr(info, "trade_stops_level", 0)) * float(info.point))
+            if is_buy and stop >= float(tick.bid) - min_distance + 1e-12:
+                raise ValueError("long stop must be below Bid by the broker's minimum stop distance")
+            if not is_buy and stop <= float(tick.ask) + min_distance - 1e-12:
+                raise ValueError("short stop must be above Ask by the broker's minimum stop distance")
+        except Exception as exc:
+            raise DemoOrderError(f"Demo order preflight failed: {type(exc).__name__}") from exc
+        request = {
+            "action": self.mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": normalized,
+            "type": self.mt5.ORDER_TYPE_BUY if is_buy else self.mt5.ORDER_TYPE_SELL,
+            "price": float(tick.ask if is_buy else tick.bid),
+            "sl": stop,
+            "tp": 0.0,
+            "deviation": self.deviation,
+            "magic": self.ai_magic,
+            "comment": f"quant_demo_ai_{strategy_id}"[:31],
+            "type_time": self.mt5.ORDER_TIME_GTC,
+            "type_filling": self._filling_mode(info),
+        }
+        return self._send(request)
+
+    def update_strategy_stop(self, position: Any, stop_loss: float) -> DemoOrderResult:
+        """Tighten an owned Demo position's server-side stop; never loosen it."""
+        self.ensure_demo_account(require_trading=True)
+        if int(position.magic) != self.ai_magic:
+            raise RuntimeError("Refusing to modify a position not owned by the XAUUSD strategy.")
+        symbol = str(position.symbol)
+        info, tick, _ = self._check_symbol(symbol, float(position.volume))
+        is_buy = int(position.type) == int(self.mt5.POSITION_TYPE_BUY)
+        candidate = self._price_to_tick(info, float(stop_loss), round_up=not is_buy)
+        old_stop = float(getattr(position, "sl", 0.0) or 0.0)
+        if is_buy and old_stop > 0 and candidate <= old_stop:
+            raise ValueError("long stop may only move upward")
+        if not is_buy and old_stop > 0 and candidate >= old_stop:
+            raise ValueError("short stop may only move downward")
+        min_distance = max(0.0, float(getattr(info, "trade_stops_level", 0)) * float(info.point))
+        if is_buy and candidate >= float(tick.bid) - min_distance + 1e-12:
+            raise ValueError("long stop must remain below Bid by the broker's minimum stop distance")
+        if not is_buy and candidate <= float(tick.ask) + min_distance - 1e-12:
+            raise ValueError("short stop must remain above Ask by the broker's minimum stop distance")
+        request = {
+            "action": self.mt5.TRADE_ACTION_SLTP,
+            "symbol": symbol,
+            "position": int(position.ticket),
+            "sl": candidate,
+            "tp": float(getattr(position, "tp", 0.0) or 0.0),
+            "magic": self.ai_magic,
+            "comment": "quant_demo_ai_trail",
+        }
+        return self._send(request)
+
+    def close_strategy_position(self, position: Any) -> DemoOrderResult:
+        """Close only this strategy's own position, and only while connected to Demo."""
+        self.ensure_demo_account(require_trading=True)
+        if int(position.magic) != self.ai_magic:
+            raise RuntimeError("Refusing to close a position not owned by the XAUUSD strategy.")
+        return self.close_position(position)
