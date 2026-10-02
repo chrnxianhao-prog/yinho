@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 from quant_demo.adapters.mt5_demo_adapter import Mt5DemoAdapter
 from research.xauusd_trailing.demo_runner import DemoStrategyRunner, next_local_time
 from research.xauusd_trailing.models import BacktestConfig
+from research.xauusd_trailing.runtime import ExclusiveRunnerLock, RuntimeRecorder, append_event, run_recorded
 
 
 def _load_config(path: Path) -> BacktestConfig:
@@ -48,7 +49,7 @@ def _cycle_anchor(value: str | None, timezone_name: str) -> datetime:
     return parsed.replace(tzinfo=tz) if parsed.tzinfo is None else parsed.astimezone(tz)
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run the XAUUSD strategy on a Demo account only; never use for live trading."
     )
@@ -56,6 +57,7 @@ def main() -> None:
     parser.add_argument("--env-path", type=Path, default=ROOT / ".env")
     parser.add_argument("--log-dir", type=Path, default=ROOT / "artifacts/xauusd_demo")
     parser.add_argument("--state-file", type=Path, default=ROOT / "artifacts/xauusd_demo/state.json")
+    parser.add_argument("--runtime-dir", type=Path, help="Runtime audit/control directory; defaults to log-dir/runtime")
     parser.add_argument("--stop-new-entries-at", help="Optional local ISO datetime after which new entries are disabled")
     parser.add_argument("--cycle-anchor-local", help="Cycle boundary anchor; defaults to the next 09:00 in strategy timezone")
     parser.add_argument("--poll-seconds", type=float, default=1.0)
@@ -79,43 +81,64 @@ def main() -> None:
     if not args.confirm_demo_strategy:
         raise SystemExit("No connection or order attempted. Pass --confirm-demo-strategy only for the verified Demo account.")
 
+    runtime = RuntimeRecorder((args.runtime_dir or args.log_dir / "runtime").resolve())
+    try:
+        with ExclusiveRunnerLock(args.state_file.resolve()):
+            if not runtime.start_allowed():
+                print(json.dumps({"manual_stop_active": True, "connection_attempted": False, "automatic_restart": False}), flush=True)
+                return 0
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            log_path = args.log_dir.resolve() / f"xauusd_demo_{stamp}.jsonl"
+            runtime.start(log_path)
+            code = run_recorded(runtime, lambda: _execute_strategy(args, runtime, log_path))
+            print(json.dumps({"runner_exit_code": code, "run_id": runtime.run_id, "automatic_restart": False}), flush=True)
+            return code
+    except Exception as exc:
+        recorded = False
+        try:
+            append_event(runtime.events_path, "RUNTIME_AUDIT_OR_LOCK_FAILURE", error_type=type(exc).__name__)
+            recorded = True
+        except OSError:
+            pass  # 审计目录不可写时至少保留非零退出和控制台告警。
+        print(json.dumps({"runner_failed": True, "error_type": type(exc).__name__,
+                          "audit_recorded": recorded, "automatic_restart": False}), flush=True)
+        return 1
+
+
+def _execute_strategy(args: argparse.Namespace, runtime: RuntimeRecorder, log_path: Path) -> str | None:
     config = _load_config(args.config.resolve())
     if config.symbol != "XAUUSD":
         raise SystemExit("This Demo runner is restricted to the XAUUSD strategy symbol.")
     cutoff = _cutoff(args.stop_new_entries_at, config.timezone)
     anchor = _cycle_anchor(args.cycle_anchor_local, config.timezone)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    log_path = args.log_dir.resolve() / f"xauusd_demo_{stamp}.jsonl"
     adapter = Mt5DemoAdapter(args.env_path.resolve())
-    runner = DemoStrategyRunner(
-        adapter, config, stop_new_entries_at=cutoff, cycle_anchor_at=anchor,
-        log_path=log_path, state_path=args.state_file.resolve(), poll_seconds=args.poll_seconds,
-        heartbeat_seconds=args.heartbeat_seconds,
-        lockout_recovery_polls=args.lockout_recovery_polls,
-        reset_lockout=args.reset_lockout,
-        reset_risk_halt=args.reset_risk_halt,
-        cycle_anchor_explicit=args.cycle_anchor_local is not None,
-    )
-    print(json.dumps({
-        "demo_only": True,
-        "new_entries_cutoff_local": cutoff.isoformat() if cutoff else None,
-        "cycle_anchor_local": anchor.isoformat(),
-        "heartbeat_interval_seconds": args.heartbeat_seconds,
-        "state_file": str(args.state_file.resolve()),
-        "reset_lockout": args.reset_lockout,
-        "reset_risk_halt": args.reset_risk_halt,
-        "session_log": str(log_path),
-    }, ensure_ascii=False), flush=True)
     try:
+        runner = DemoStrategyRunner(
+            adapter, config, stop_new_entries_at=cutoff, cycle_anchor_at=anchor,
+            log_path=log_path, state_path=args.state_file.resolve(), poll_seconds=args.poll_seconds,
+            heartbeat_seconds=args.heartbeat_seconds,
+            lockout_recovery_polls=args.lockout_recovery_polls,
+            reset_lockout=args.reset_lockout,
+            reset_risk_halt=args.reset_risk_halt,
+            cycle_anchor_explicit=args.cycle_anchor_local is not None,
+            stop_requested=runtime.manual_stop_requested, run_id=runtime.run_id,
+        )
+        print(json.dumps({
+            "demo_only": True, "run_id": runtime.run_id,
+            "new_entries_cutoff_local": cutoff.isoformat() if cutoff else None,
+            "cycle_anchor_local": anchor.isoformat(),
+            "heartbeat_interval_seconds": args.heartbeat_seconds,
+            "state_file": str(args.state_file.resolve()),
+            "reset_lockout": args.reset_lockout,
+            "reset_risk_halt": args.reset_risk_halt,
+            "session_log": str(log_path), "runtime_dir": str(runtime.directory),
+            "automatic_restart": False,
+        }, ensure_ascii=False), flush=True)
         runner.run()
-    except KeyboardInterrupt:
-        raise
-    except Exception as exc:
-        print(json.dumps({"runner_failed": True, "error_type": type(exc).__name__}, ensure_ascii=False), flush=True)
-        raise SystemExit(1) from exc
+        return runner.exit_reason
     finally:
         adapter.close()
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

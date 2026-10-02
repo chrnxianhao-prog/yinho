@@ -52,13 +52,41 @@ python scripts/run_xauusd_demo_strategy.py --confirm-demo-strategy
 
 运行器仍执行 Demo-only、对冲账户、订单前预检、止损只收紧不放松、订单结果不确定时锁定等既有保护。持仓/周期状态原子写入 `artifacts/xauusd_demo/state.json`；可通过 `--state-file` 改路径。启动时能读取状态则接管已有本策略仓位；已有策略仓位但状态无法读取时会拒绝启动并要求先人工核对 MT5 持仓/服务器止损及状态文件。连续成功轮询达到 `--lockout-recovery-polls`（默认 60）后自动解除入场锁定；可在确认账户/状态无异常后使用 `--reset-lockout`。
 
-默认每 60 秒记录心跳，含实际 `check_minutes`、`require_latest_m1_cross`、数据等待原因、当日已实现+浮动盈亏、当前回撤、熔断、入场锁定、周期亏损/全部止损计数、下一休市时间与其数据来源。独立看门狗只检查 JSONL 心跳是否过期，输出日志及退出码，不会平仓或重启：
+默认每 60 秒记录心跳，含本次运行唯一 `run_id`、实际 Python 进程 PID、实际 `check_minutes`、`require_latest_m1_cross`、数据等待原因、当日已实现+浮动盈亏、当前回撤、熔断、入场锁定、周期亏损/全部止损计数、下一休市时间与其数据来源。看门狗独立核对进程是否存在及创建标识、同一运行的心跳是否过期（默认 180 秒）、终端断线/查询错误/入场锁定，输出日志及退出码，不会平仓或重启：
 
 ```powershell
-python scripts/xauusd_watchdog.py --log artifacts/xauusd_demo/xauusd_demo_<时间戳>.jsonl --max-age-seconds 180
+python scripts/xauusd_watchdog.py --log-dir artifacts/xauusd_demo --max-age-seconds 180
 ```
 
-Demo 进程停止时不会继续推移动止损；券商端已挂止损是否保留，取决于账户和订单实际状态。看门狗不能替代进程监控或券商端风险控制。
+### 停机审计与人工停止（2026-10-01 本次补充）
+
+旧版只有交易心跳，进程结束时没有可靠的停机原因；退出码 0、旧心跳或终端仍在后台不能证明策略正常。新口径只有“明确确认的人工停止请求被本次运行器接收，保存策略状态并记录人工退出”属于正常停机。其它退出均默认异常，包括更新导致进程消失、未确认的中断、意外返回/退出码 0、截止时间到且空仓后的旧版自动返回。此修订只分类并告警，不改变截止时间、入场、移动止损或会话平仓等交易规则。
+
+- `runtime/runtime.json` 保存当前 `run_id`、PID/创建标识、起止时间、阶段及退出原因；`runtime/lifecycle.jsonl` 追加生命周期事件。异常只记录异常类型和调用位置，不记录异常消息、密钥、局部变量或账户密码。
+- `runtime/control.json` 保存明确人工停止意图和目标 `run_id`，运行器确认后的凭证另存入运行审计，解除停止标记不会篡改此前的正常停机事实。后补一个停止标记不能把已经消失的进程改成正常停机。
+- `watchdog.jsonl` 保存每次检查和 `RUNTIME_ANOMALY_DETECTED`/`RUNTIME_ANOMALY_CLEARED` 事件；`runtime/watchdog_status.json` 保存最新检查。同一未改变的问题不重复创建“新事件”，但保留检查记录。退出码 1 表示异常；退出码 0 的 `WATCHDOG_STARTING`/人工停止等待表示过渡状态，不等于已确认正在监测。
+- 每个策略 state 文件使用操作系统排他锁，避免两个新版运行器同时接管同一状态；强杀后操作系统释放锁。没有旧运行结束记录时，下一次显式启动必须补记异常，不能静默覆盖。锁和审计文件不是 MT5 交易命令。
+
+人工停止入口（对正在运行的新版运行器生效，不连接 MT5）：
+
+```powershell
+python scripts/xauusd_runtime_control.py stop --confirm-manual-stop
+python scripts/xauusd_runtime_control.py status
+```
+
+运行器下一次轮询接收停止请求，先保存周期计数、已消费交叉、锁定状态及持仓快照，再退出；不主动平仓、不移除已挂止损。应通过 `status`/看门狗确认 `MANUAL_STOPPED`，不能把“请求已写入”当作“停止已完成”。直接强杀或没有记录的 Ctrl+C 无法核验是否由用户发起，默认按异常处理。
+
+人工停止意图持续保留，后续启动入口先检查该标记；未解除时不连接 MT5。以下命令仅表达恢复意图并解除标记，本身不会启动策略：
+
+```powershell
+python scripts/xauusd_runtime_control.py clear-stop --confirm-demo-resume-intent
+```
+
+如自定义运行器 `--runtime-dir`，控制脚本和看门狗也必须使用同一路径。看门狗是单次检查工具，需要独立调度才会持续检查；本次按用户选择仅完善本地记录与告警，**不部署自动重启，不恢复已停止的 Demo，也没有开通持续调度或远程推送通知**。既有“运行中连续成功轮询后解除 entry lockout”的交易规则保留，这不是退出后的进程自动恢复。
+
+熔断、周期暂停、正常休市属于交易限制；进程应继续心跳，不能把它们当成正常进程退出。不可抗力需要日志/系统事件证据与人工确认，不能由程序仅凭“断线/没有心跳”自动豁免。断电、系统彻底停机时本机看门狗也无法立即记录或通知；恢复后需核验，若要求即时外部告警须另行部署独立监控。
+
+Demo 进程停止时不会继续推移动止损；券商端已挂止损是否保留，取决于账户和订单实际状态。看门狗不能替代券商端风险控制。测试命令：`python -m unittest discover -s tests -p 'test_xauusd_*.py'`，包括退出分类、人工停止确认、强杀后补记、旧心跳/PID 复用、异常去重及无 MT5 的交易安全回归。
 
 ## 研究防护和报告
 

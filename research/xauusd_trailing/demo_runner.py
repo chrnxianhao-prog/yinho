@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, time as wall_time, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -195,6 +195,8 @@ class DemoStrategyRunner:
         reset_lockout: bool = False,
         reset_risk_halt: bool = False,
         cycle_anchor_explicit: bool = False,
+        stop_requested: Callable[[], bool] | None = None,
+        run_id: str | None = None,
     ) -> None:
         if stop_new_entries_at is not None and stop_new_entries_at.tzinfo is None:
             raise ValueError("stop_new_entries_at must be timezone-aware")
@@ -219,6 +221,9 @@ class DemoStrategyRunner:
         self.reset_lockout_requested = reset_lockout
         self.reset_risk_halt_requested = reset_risk_halt
         self.cycle_anchor_explicit = cycle_anchor_explicit
+        self.stop_requested = stop_requested
+        self.run_id = run_id
+        self.exit_reason: str | None = None
         self._last_heartbeat_monotonic: float | None = None
         self.started_at = datetime.now(UTC)
         self.entries_by_cycle: dict[str, int] = {}
@@ -334,6 +339,7 @@ class DemoStrategyRunner:
             "time_utc": now.isoformat(),
             "time_local": now.astimezone(self.tz).isoformat(),
             "event": event,
+            "run_id": self.run_id,
             **fields,
         }
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -456,6 +462,19 @@ class DemoStrategyRunner:
         if positions is None:
             raise RuntimeError("MT5 position query failed")
         return [position for position in positions if int(position.magic) == self.adapter.ai_magic]
+
+    def _manual_stop_if_requested(self) -> bool:
+        if self.stop_requested is None or not self.stop_requested():
+            return False
+        # 不平仓、不移除券商止损；先保存原有周期/交叉/锁定状态再停止。
+        self._persist_state()
+        self.exit_reason = "USER_MANUAL_STOP"
+        self._log(
+            "RUN_FINISHED", reason=self.exit_reason,
+            open_strategy_positions=len(self._position_state),
+            note="Explicit recorded user stop; broker SLs unchanged; automatic restart disabled.",
+        )
+        return True
 
     def _refresh_frames(self, as_of: datetime) -> None:
         mt5 = self.adapter.mt5
@@ -981,6 +1000,8 @@ class DemoStrategyRunner:
             self._maybe_log_heartbeat(force=True)
             while True:
                 now = datetime.now(UTC)
+                if self._manual_stop_if_requested():
+                    return
                 try:
                     tick = mt5.symbol_info_tick(self.config.symbol)
                     if tick is None:
@@ -1012,6 +1033,7 @@ class DemoStrategyRunner:
                     self._consider_entry(tick_at, bid, ask)
                     positions = self._snapshot_owned_positions()
                     if self.stop_new_entries_at is not None and now >= self.stop_new_entries_at and not positions:
+                        self.exit_reason = "ENTRY_CUTOFF_AND_NO_OPEN_STRATEGY_POSITIONS"
                         self._log("RUN_FINISHED", reason="ENTRY_CUTOFF_AND_NO_OPEN_STRATEGY_POSITIONS")
                         return
                     self.last_runtime_error_type = None
