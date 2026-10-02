@@ -180,7 +180,8 @@ class RuntimeRecorder:
     def manual_stop_requested(self) -> bool:
         value = self.control()
         return (
-            value["desired_state"] == "STOPPED" and value.get("target_run_id") == self.run_id
+            value["desired_state"] == "STOPPED"
+            and (value.get("target_run_id") == self.run_id or value.get("stop_scope") == "strategy")
             and self.run_id is not None and bool(value.get("request_id"))
         )
 
@@ -191,6 +192,7 @@ class RuntimeRecorder:
         value = {
             "desired_state": "STOPPED", "manual_confirmation": True,
             "request_id": uuid.uuid4().hex, "target_run_id": running.get("run_id") if running else None,
+            "stop_scope": "strategy",  # 重启交接期间的新 run_id 也必须服从人工停止。
             "requested_at_utc": datetime.now(UTC).isoformat(),
         }
         write_record(self.control_path, value)
@@ -211,7 +213,8 @@ class RuntimeRecorder:
         manual = (
             reason == "USER_MANUAL_STOP" and exit_code == 0
             and control["desired_state"] == "STOPPED" and self.run_id is not None
-            and control.get("target_run_id") == self.run_id and bool(control.get("request_id"))
+            and (control.get("target_run_id") == self.run_id or control.get("stop_scope") == "strategy")
+            and bool(control.get("request_id"))
         )
         code = 0 if manual else (exit_code or 1)
         value = read_record(self.runtime_path)
@@ -223,7 +226,7 @@ class RuntimeRecorder:
             classification="USER_MANUAL_STOP" if manual else "ANOMALY", automatic_restart=False,
             stack_locations=stack_locations or [],
             manual_stop_request_id=control.get("request_id") if manual else None,
-            manual_stop_acknowledgement=dict(control) if manual else None,
+            manual_stop_acknowledgement={**control, "accepted_run_id": self.run_id} if manual else None,
         )
         write_record(self.runtime_path, value)
         append_event(self.events_path, "RUNTIME_MANUAL_STOPPED" if manual else "RUNTIME_ABNORMAL_EXIT", **value)
@@ -268,7 +271,9 @@ def classify_health(
             return {**result, "reason": "MANUAL_STOP_UNVERIFIABLE"}
         if (acknowledgement.get("manual_confirmation") is True
                 and acknowledgement.get("desired_state") == "STOPPED"
-                and acknowledgement.get("target_run_id") == runtime.get("run_id")
+                and acknowledgement.get("accepted_run_id", acknowledgement.get("target_run_id")) == runtime.get("run_id")
+                and (acknowledgement.get("target_run_id") == runtime.get("run_id")
+                     or acknowledgement.get("stop_scope") == "strategy")
                 and acknowledgement.get("request_id") == runtime.get("manual_stop_request_id")
                 and runtime.get("manual_stop_request_id")
                 and runtime.get("exit_reason") == "USER_MANUAL_STOP"
@@ -317,7 +322,7 @@ def classify_health(
     if heartbeat.get("last_runtime_error_type") or heartbeat.get("entry_lockout"):
         return {**result, "reason": "RUNTIME_ENTRY_LOCKOUT"}
     if control.get("desired_state") == "STOPPED":
-        if control.get("target_run_id") != runtime.get("run_id"):
+        if control.get("target_run_id") != runtime.get("run_id") and control.get("stop_scope") != "strategy":
             return {**result, "reason": "STOP_INTENT_TARGET_MISMATCH"}
         requested = datetime.fromisoformat(str(control["requested_at_utc"]))
         if requested.tzinfo is None:

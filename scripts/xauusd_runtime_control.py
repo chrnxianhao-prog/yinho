@@ -28,7 +28,11 @@ def main() -> int:
             runtime.clear_manual_stop(confirmed=args.confirm_demo_resume_intent)
             result = {"manual_stop_cleared": True, "runner_started": False, "automatic_restart": False}
         else:
+            recovery = read_record(runtime.directory / "recovery_config.json")
             result = {"control": runtime.control(), "runtime": read_record(runtime.runtime_path),
+                      "auto_recovery_enabled": bool(recovery and recovery.get("enabled") is True
+                                                    and recovery.get("demo_only_confirmed") is True),
+                      "supervisor": read_record(runtime.directory / "supervisor_status.json"),
                       "note": "Desired state is an intent, not proof that a runner is alive; use watchdog for health."}
     except (OSError, ValueError) as exc:
         print(json.dumps({"control_failed": True, "error_type": type(exc).__name__, "automatic_restart": False}), flush=True)
