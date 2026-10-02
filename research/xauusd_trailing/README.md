@@ -82,7 +82,37 @@ python scripts/xauusd_runtime_control.py status
 python scripts/xauusd_runtime_control.py clear-stop --confirm-demo-resume-intent
 ```
 
-如自定义运行器 `--runtime-dir`，控制脚本和看门狗也必须使用同一路径。看门狗是单次检查工具，需要独立调度才会持续检查；本次按用户选择仅完善本地记录与告警，**不部署自动重启，不恢复已停止的 Demo，也没有开通持续调度或远程推送通知**。既有“运行中连续成功轮询后解除 entry lockout”的交易规则保留，这不是退出后的进程自动恢复。
+如自定义运行器 `--runtime-dir`，控制脚本和看门狗也必须使用同一路径。看门狗本身仍是单次检查工具，不执行重启。2026-10-01 用户曾要求只记录告警；2026-10-02 明确改为“故障自动重启，主动停止不重启”，由下面的独立守护实现。远程推送通知仍未开通。既有“运行中连续成功轮询后解除 entry lockout”的交易规则保留，不通过重启清除锁定。
+
+### 故障自动恢复与 Windows 独立任务（2026-10-02 用户确认）
+
+`supervision.py` 与 `scripts/xauusd_supervisor.py` 只管理进程生命周期，不含 MT5 下单代码。部署后守护每 15 秒检查一次：
+
+- 现有策略进程已退出且控制意图为 `RUNNING`：使用原配置、原 `.env` 路径和同一 `state.json` 拉起 Demo 运行器；不传入任何锁定/熔断复位参数，不清零周期计数、不重发历史订单。运行器仍重新验证 Demo、hedging、已有仓位服务端止损，只有通过所有既有规则才允许交易。
+- `control.json` 明确 `STOPPED`：不启动新策略，不自动解除标记。人工停止是策略全局意图，在旧/新 `run_id` 交接中也有效；新进程若恰好与停止请求交错，启动门控或下一轮轮询必须接受停止。
+- 已存活但心跳超时、MT5 断线或订单不确定锁定：持续告警，不强杀、不新建第二个实例。熔断/周期暂停/正常休市也不通过反复重启解除。
+- 状态文件缺失/损坏、进程身份无法核验或找不到配置的 MT5 可见窗口：阻止恢复并留痕；不让 `initialize()` 隐式启动隐藏终端。MT5 关闭后需先打开原 Demo 终端；守护会继续等待，不更改账号或设置。
+- 启动失败按 60、120、240……秒退避，上限 900 秒，退避状态持久化；确认新运行心跳健康后清除失败次数。正在启动的进程不重复拉起，启动超时仍存活则告警，不盲目强杀。
+
+配置和安装都需要明确 Demo 恢复授权，凭据只从本地 `.env` 读取，不进入服务配置/任务参数：
+
+```powershell
+python scripts/xauusd_supervisor.py --configure --confirm-demo-auto-recovery `
+  --python-executable '<现有虚拟环境>/Scripts/python.exe' `
+  --env-path '<现有本地 .env>' --terminal-path '<已有 MT5>/terminal64.exe'
+
+./scripts/install_xauusd_recovery_task.ps1 -ConfirmDemoAutoRecovery `
+  -PythonwPath '<现有虚拟环境>/Scripts/pythonw.exe' `
+  -ServiceConfig './artifacts/xauusd_demo/runtime/recovery_config.json'
+```
+
+Windows 任务 `XAUUSD-Demo-Recovery-f8bf` 在当前用户登录会话中以普通权限执行 `pythonw`，不存储系统密码、不弹终端；守护常驻，每分钟兜底触发且忽略重复实例，用户登录时也触发。任务不设置三天默认执行限时，允许电池供电时继续；并给守护本身设置失败重试。任务不依赖 Codex 进程，但电脑关机、睡眠、用户注销或 Windows 任务服务不可用时不能保证交易管理；重新登录且 MT5 窗口就绪后才可恢复。[Microsoft 任务设置说明](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtasksettingsset?view=windowsserver2025-ps)、[用户会话 principal](https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtaskprincipal?view=windowsserver2025-ps)。
+
+`runtime/recovery_config.json` 保存显式授权和本机路径；`supervisor_status.json` 保存最新检查、守护 PID/创建标识和退避/待启动状态；`supervisor.jsonl` 追加接管、故障恢复、阻止恢复等事件。`xauusd_runtime_control.py status` 同时显示 `auto_recovery_enabled` 和守护状态。独立运行器/看门狗的 `automatic_restart=false` 仍表示“它自身不会重启”；已部署的外部守护以 `auto_recovery_enabled=true` 和守护实况为准，不能只看孤立字段。
+
+人工停止仍用 `stop --confirm-manual-stop`，守护继续运行但保持不启动策略。`clear-stop --confirm-demo-resume-intent` 本身不启动进程；启用守护后明确解除停止意图，会允许守护下一轮恢复 Demo。直接在任务管理器结束策略进程或无停止凭证的 Ctrl+C 会被当作故障并自动拉起，因此主动停止必须使用已记录的停止入口。不要只关一个 Python 窗口来表达长期停机。
+
+无 MT5 的集成测试使用独立假运行器，实际执行“故障退出→重启→人工停止→不再重启”，核对 state 内容未改变；绝不通过强杀真实 Demo 运行器来演示恢复。
 
 熔断、周期暂停、正常休市属于交易限制；进程应继续心跳，不能把它们当成正常进程退出。不可抗力需要日志/系统事件证据与人工确认，不能由程序仅凭“断线/没有心跳”自动豁免。断电、系统彻底停机时本机看门狗也无法立即记录或通知；恢复后需核验，若要求即时外部告警须另行部署独立监控。
 
